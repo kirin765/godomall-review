@@ -8,8 +8,8 @@ export const dynamic = 'force-dynamic';
 export default async function Home({ searchParams }: { searchParams: Promise<{ code?: string; solution?: string }> }) {
   const sp = await searchParams;
 
-  if (sp.code && sp.solution === 'godomall') {
-    redirect(`/api/auth/launch?code=${encodeURIComponent(sp.code)}&solution=godomall`);
+  if (sp.code && (sp.solution === 'godomall' || sp.solution === 'godo')) {
+    redirect(`/api/auth/launch?code=${encodeURIComponent(sp.code)}&solution=${sp.solution}`);
   }
 
   const mallNo = await sessionMall();
