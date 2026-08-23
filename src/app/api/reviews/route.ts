@@ -3,7 +3,7 @@ import { randomBytes } from 'crypto';
 import { sessionMall } from '@/lib/launch';
 import { importReviews, type ExternalReview } from '@/lib/godomall';
 import { parseReviewFile, toDateTime, type ImportedReview } from '@/lib/reviewImport';
-import { checkQuota, addUsage } from '@/lib/quota';
+import { checkQuota, addUsage, FREE_LIMIT } from '@/lib/quota';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -59,6 +59,12 @@ export async function POST(req: NextRequest) {
   }
 
   const quota = await checkQuota(session.mallNo, reviews.length);
+  if (!quota.configured) {
+    return NextResponse.json(
+      { error: 'review quota is not configured' },
+      { status: 503 },
+    );
+  }
   if (quota.allowed <= 0) {
     return NextResponse.json({ quotaExceeded: true, used: quota.used, error: 'free limit reached' }, { status: 402 });
   }
@@ -82,7 +88,7 @@ export async function POST(req: NextRequest) {
 
   if (!quota.paid) await addUsage(session.mallNo, written);
 
-  const remaining = quota.paid ? null : Math.max(0, 20 - quota.used - written);
+  const remaining = quota.paid ? null : Math.max(0, FREE_LIMIT - quota.used - written);
   return NextResponse.json({
     parsed: reviews.length,
     written,
