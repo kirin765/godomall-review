@@ -30,6 +30,7 @@ function toPayload(source: string, productNo: number, r: ImportedReview): Extern
     externalSiteDateTime: toDateTime(r.createdAt),
     naverReviewFlag: s.naver,
     secretFlag: 'N',
+    attachmentUrls: r.imageUrl ? [r.imageUrl] : undefined,
   };
 }
 
@@ -53,7 +54,7 @@ export async function POST(req: NextRequest) {
 
   if (dryRun) {
     const sample = reviews.slice(0, 3).map((r) => ({
-      writer: r.writer, content: r.content, score: r.score, createdAt: toDateTime(r.createdAt), option: r.option,
+      writer: r.writer, content: r.content, score: r.score, createdAt: toDateTime(r.createdAt), option: r.option, imageUrl: r.imageUrl,
     }));
     return NextResponse.json({ dryRun: true, count: reviews.length, sample });
   }

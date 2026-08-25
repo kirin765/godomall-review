@@ -7,6 +7,7 @@ export type ImportedReview = {
   createdAt: string | null;
   option: string | null;
   productName: string | null;
+  imageUrl: string | null;
 };
 
 /**
@@ -21,6 +22,7 @@ const PATTERNS: Record<keyof ImportedReview, RegExp> = {
   createdAt: /작성일|등록일|날짜|일시|date/i,
   option: /옵션|option/i,
   productName: /상품명|상품|product/i,
+  imageUrl: /이미지|사진|사진url|이미지url|리뷰사진|image|photo|url/i,
 };
 
 function pickColumns(headers: string[]) {
@@ -31,7 +33,9 @@ function pickColumns(headers: string[]) {
       (h) =>
         PATTERNS[key].test(h) &&
         !(key === 'content' && /상품명/.test(h)) &&
-        !(key === 'option' && /id/i.test(h)),
+        !(key === 'content' && PATTERNS.imageUrl.test(h)) &&
+        !(key === 'option' && /id/i.test(h)) &&
+        !(key === 'imageUrl' && /상품명|노출상품|옵션/.test(h)),
     );
     if (i >= 0) map[key] = i;
   });
@@ -61,6 +65,7 @@ export function parseReviewFile(buf: ArrayBuffer): { reviews: ImportedReview[]; 
       createdAt: cell(r, col.createdAt) || null,
       option: cell(r, col.option) || null,
       productName: cell(r, col.productName) || null,
+      imageUrl: cell(r, col.imageUrl) || null,
     });
   }
   return { reviews, headers };

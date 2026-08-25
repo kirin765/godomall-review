@@ -88,6 +88,7 @@ export type ExternalReview = {
   externalSiteDateTime: string | null;
   naverReviewFlag: 'Y' | 'N';
   secretFlag: 'Y' | 'N';
+  attachmentUrls?: string[];
 };
 
 /** 외부 상품 리뷰 일괄 등록(최대 100개). godomall이 공식 제공하는 리뷰 이전 엔드포인트. */

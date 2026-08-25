@@ -7,7 +7,7 @@ type Quota = { used: number; limit: number; paid: boolean };
 type Result = {
   dryRun?: boolean;
   count?: number;
-  sample?: { writer: string; content: string; option?: string; score?: number; createdAt?: string | null }[];
+  sample?: { writer: string; content: string; option?: string; score?: number; createdAt?: string | null; imageUrl?: string | null }[];
   parsed?: number;
   written?: number;
   skipped?: number;
@@ -199,6 +199,11 @@ export default function Admin() {
                     {s.createdAt && <span className="text-neutral-400"> {s.createdAt}</span>}
                     {' — '}{s.content}
                     {s.option && <span className="text-neutral-500"> [옵션] {s.option}</span>}
+                    {s.imageUrl && (
+                      <span className="mt-1 block">
+                        <a href={s.imageUrl} target="_blank" rel="noreferrer" className="underline">첨부 이미지</a>
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>
