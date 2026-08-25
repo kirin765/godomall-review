@@ -85,7 +85,8 @@ async function grantPaid(mallNo: string | number, eventType: string, data: {
     console.warn(`[paddle] no godomall token for mall ${mallNo}, skipping extend`);
     return;
   }
-  const requestDateTime = paidUntil.toISOString().slice(0, 19).replace('T', ' '); // YYYY-MM-DD hh:mm:ss KST
+  // godomall requestDateTime은 KST 벽시계("YYYY-MM-DD hh:mm:ss") — UTC ISO를 KST로 보정
+  const requestDateTime = new Date(paidUntil.getTime() + 9 * 3600e3).toISOString().slice(0, 19).replace('T', ' ');
   try {
     await extendAppInstall(token, {
       orderNo: `paddle_${data.id ?? 'sub'}_${Date.now()}`,
