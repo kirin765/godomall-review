@@ -30,8 +30,9 @@ export async function POST(req: NextRequest) {
   }
 
   if (body.eventType === 'CHANGE_APP_STATUS' && body.currentStatus === 'DELETED') {
-    const mallNo = Number(body.mallNo);
-    if (mallNo > 0) await resetUsage(mallNo);
+    // godomall(GODO)는 shopNo를 쓴다. mallNo는 샵바이 전용이므로 GODO에서 둘 다 오면 shopNo 우선.
+    const shopNo = Number(body.shopNo ?? body.mallNo);
+    if (shopNo > 0) await resetUsage(shopNo);
   }
 
   return NextResponse.json({ ok: true });

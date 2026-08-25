@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sessionMall } from '@/lib/launch';
 import { listGoods } from '@/lib/godomall';
-import { checkQuota } from '@/lib/quota';
+import { checkQuota, DAILY_LIMIT } from '@/lib/quota';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -13,7 +13,22 @@ export async function GET(req: NextRequest) {
 
   const page = Number(req.nextUrl.searchParams.get('page') || '1');
   const data = await listGoods(session.accessToken, Number.isFinite(page) && page > 0 ? page : 1);
-  const quota = await checkQuota(session.mallNo, 0);
+
+  let quota;
+  try {
+    quota = await checkQuota(session.accessToken, session.mallNo, 0);
+  } catch (e) {
+    quota = {
+      allowed: 0,
+      paid: false,
+      used: 0,
+      limit: DAILY_LIMIT,
+      day: '',
+      status: 'EXPIRED' as const,
+      expiresAt: null,
+      error: (e as Error).message.slice(0, 120),
+    };
+  }
 
   return NextResponse.json({
     mallNo: session.mallNo,

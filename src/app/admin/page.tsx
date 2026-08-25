@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 
 type Product = { no: number; name: string };
-type Quota = { used: number; limit: number; paid: boolean };
+type Quota = { used: number; limit: number; paid: boolean; day?: string; expiresAt?: string | null; status?: string };
 type Result = {
   dryRun?: boolean;
   count?: number;
@@ -15,6 +15,7 @@ type Result = {
   paid?: boolean;
   quotaExceeded?: boolean;
   used?: number;
+  limit?: number;
   error?: string;
   headers?: string[];
 };
@@ -25,17 +26,40 @@ const SOURCES = [
   { value: 'etc', label: '기타' },
 ];
 
+function formatExpiry(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function QuotaBar({ quota }: { quota: Quota | null }) {
-  const used = Math.min(quota?.used ?? 20, quota?.limit ?? 20);
+  // 유료면 무제한, 아니면 "오늘 남은 건수"
+  const used = quota?.paid ? 0 : Math.min(quota?.used ?? 0, quota?.limit ?? 20);
   const limit = quota?.limit ?? 20;
+  const remaining = quota?.paid ? null : limit - used;
   return (
     <div className="mt-4 rounded-lg border border-neutral-300 bg-white p-4">
-      <p className="text-sm font-medium">무료 20건을 모두 사용했어요</p>
-      <div className="mt-3 h-1.5 w-full rounded-full bg-neutral-100">
-        <div className="h-1.5 rounded-full bg-black transition-all" style={{ width: `${Math.min(100, Math.round((used / limit) * 100))}%` }} />
-      </div>
-      <p className="mt-1 text-[11px] text-neutral-500">무료 {limit}건 중 {used}건 사용</p>
-      <p className="mt-2 text-[11px] text-neutral-500">유료 전환은 준비 중입니다.</p>
+      <p className="text-sm font-medium">
+        {quota?.paid ? '유료 이용 중 — 무제한으로 옮길 수 있어요' : '오늘의 무료 한도를 모두 사용했어요'}
+      </p>
+      {!quota?.paid && (
+        <>
+          <div className="mt-3 h-1.5 w-full rounded-full bg-neutral-100">
+            <div className="h-1.5 rounded-full bg-black transition-all" style={{ width: `${Math.min(100, Math.round((used / limit) * 100))}%` }} />
+          </div>
+          <p className="mt-1 text-[11px] text-neutral-500">
+            오늘 {limit}건 중 {used}건 사용 · 남은 {remaining}건
+          </p>
+          {quota?.expiresAt && (
+            <p className="mt-1 text-[11px] text-neutral-500">무료 체험 만료일: {formatExpiry(quota.expiresAt)}</p>
+          )}
+        </>
+      )}
+      <a href="/pay" target="_blank" className="mt-3 inline-block rounded bg-black px-4 py-2 text-sm text-white">
+        월 9,900원으로 계속 옮기기
+      </a>
+      <p className="mt-2 text-[11px] text-neutral-500">결제 후 이 화면에서 다시 「옮기기」를 누르면 이어서 진행됩니다.</p>
     </div>
   );
 }
@@ -75,7 +99,7 @@ export default function Admin() {
     const res = await fetch('/api/reviews', { method: 'POST', body: fd });
     const json = await res.json();
     if (res.status === 402) {
-      setResult({ quotaExceeded: true, used: json.used });
+      setResult({ quotaExceeded: true, used: json.used, limit: json.limit });
       setQuota((q) => (q ? { ...q, used: q.limit } : q));
     } else {
       setResult(json);
@@ -173,7 +197,15 @@ export default function Admin() {
       </div>
 
       <p className="mt-8 border-t pt-4 text-xs text-neutral-500">
-        무료로 20건까지 옮겨볼 수 있어요.{' · '}
+        {quota?.paid ? (
+          <>유료 이용 중 — 건수 제한 없이 옮길 수 있어요.</>
+        ) : (
+          <>
+            무료로 하루 20건까지 옮겨볼 수 있어요. 그 이상은{' '}
+            <a href="/pay" target="_blank" className="underline">월 9,900원</a>.
+          </>
+        )}
+        {' · '}
         <a href="/privacy" className="underline">개인정보처리방침</a>
       </p>
 

@@ -3,7 +3,7 @@ import { randomBytes } from 'crypto';
 import { sessionMall } from '@/lib/launch';
 import { importReviews, type ExternalReview } from '@/lib/godomall';
 import { parseReviewFile, toDateTime, type ImportedReview } from '@/lib/reviewImport';
-import { checkQuota, addUsage, FREE_LIMIT } from '@/lib/quota';
+import { checkQuota, addUsage, DAILY_LIMIT } from '@/lib/quota';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -58,15 +58,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ dryRun: true, count: reviews.length, sample });
   }
 
-  const quota = await checkQuota(session.mallNo, reviews.length);
-  if (!quota.configured) {
+  let quota;
+  try {
+    quota = await checkQuota(session.accessToken, session.mallNo, reviews.length);
+  } catch (e) {
     return NextResponse.json(
-      { error: 'review quota is not configured' },
-      { status: 503 },
+      { error: `접근 상태를 확인하지 못했습니다: ${(e as Error).message.slice(0, 120)}` },
+      { status: 502 },
     );
   }
   if (quota.allowed <= 0) {
-    return NextResponse.json({ quotaExceeded: true, used: quota.used, error: 'free limit reached' }, { status: 402 });
+    return NextResponse.json(
+      { quotaExceeded: true, used: quota.used, limit: quota.limit, paid: quota.paid, status: quota.status, expiresAt: quota.expiresAt, error: '이용 한도를 모두 사용했어요' },
+      { status: 402 },
+    );
   }
 
   const toWrite = reviews.slice(0, quota.allowed);
@@ -88,7 +93,7 @@ export async function POST(req: NextRequest) {
 
   if (!quota.paid) await addUsage(session.mallNo, written);
 
-  const remaining = quota.paid ? null : Math.max(0, FREE_LIMIT - quota.used - written);
+  const remaining = quota.paid ? null : Math.max(0, DAILY_LIMIT - quota.used - written);
   return NextResponse.json({
     parsed: reviews.length,
     written,
