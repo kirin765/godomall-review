@@ -31,6 +31,7 @@ function textTransform(upstream: ReadableStream<Uint8Array>) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buf = '';
+  let metaSent = false;
 
   return upstream.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
@@ -45,6 +46,11 @@ function textTransform(upstream: ReadableStream<Uint8Array>) {
           if (payload === '[DONE]') continue;
           try {
             const json = JSON.parse(payload);
+            // 첫 이벤트에 사용된 모델명을 함께 실어 검증·디버깅에 쓴다 (클라이언트는 text만 읽는다)
+            if (!metaSent && typeof json?.model === 'string' && json.model) {
+              metaSent = true;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: '', model: json.model })}\n\n`));
+            }
             const text = json?.choices?.[0]?.delta?.content;
             if (typeof text === 'string' && text) {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
