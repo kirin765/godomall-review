@@ -1,5 +1,17 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## 고객지원 챗봇 (AI)
+
+모든 페이지 우측 하단의 채팅 버튼과 [`/support`](http://localhost:3000/support) 페이지에
+고객지원 AI 챗봇이 붙어 있다.
+
+- 엔드포인트: `POST /api/chat` — OpenRouter(OpenAI 호환) Chat Completions 스트리밍을 `{"text": ...}` SSE로 흘려보낸다
+- 지식 베이스: [`src/lib/chat/knowledge.ts`](src/lib/chat/knowledge.ts) — 앱 소개·이용 방법·규칙을
+  수정하면 프롬프트에 반영된다 (빌드 불필요, 글만 고치면 됨)
+- 설정: `OPENROUTER_API_KEY` 필수, `OPENROUTER_MODEL`(기본 `openai/gpt-4o-mini`) 선택.
+  키가 없으면 챗봇은 503을 반환하고 화면에는 이메일 안내가 대신 보인다
+- UI: `src/components/chat/ChatPanel.tsx`(패널 본체) + `ChatWidget.tsx`(플로팅 버튼)
+
 ## Getting Started
 
 First, run the development server:
