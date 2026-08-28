@@ -1,11 +1,10 @@
 const SYSTEM_KEY = process.env.GODOMALL_SYSTEM_KEY || '';
 const SECRET_KEY = process.env.GODOMALL_SECRET_KEY || '';
-const REDIRECT_URI = process.env.GODOMALL_REDIRECT_URI || '';
 export const APP_NO = Number(process.env.GODOMALL_APP_NO || '0');
 
 /**
- * 고도몰 server API 베이스. 운영은 프록시(godo-proxy, egress = 등록 IP 218.237.176.17)를 가리킨다.
- * 로컬 개발은 홈 네트워크에서 직접(동일 공인 IP) 호출하므로 기본값 = 원본.
+ * 고도몰 server API 베이스. 운영은 프록시(godo-proxy, cloudflared)를 가리키며 프록시의 egress IP가
+ * 개발자센터 "IP 설정"에 등록돼 있어야 한다. 로컬 개발은 홈 네트워크에서 직접 호출하므로 기본값 = 원본.
  * 장기토큰(100년)은 앱에 등록된 IP에서만 server API 호출이 가능하다(API 스펙 원문).
  */
 export const API_BASE = process.env.GODO_API_BASE || 'https://server-api.godomall.com';
@@ -35,15 +34,19 @@ export function authHeaders(token?: string, version = '1.1'): Record<string, str
   return h;
 }
 
-/** authorizationCode로 장기토큰(100년) 발급. redirect_uri는 앱 등록 시 입력한 값과 정확히 일치해야 한다. */
-export async function exchangeLongLived(code: string): Promise<{ access_token: string; expire_in: string }> {
+/**
+ * authorizationCode로 장기토큰(100년) 발급.
+ * redirect_uri는 고도몰 개발자센터 "redirect URI" 필드에 등록한 값과 정확히 일치해야 한다(앱 URI와 다름).
+ * 불일치 시 403 A0003 "Redirect url 이 잘못되었습니다".
+ */
+export async function exchangeLongLived(code: string, redirectUri: string): Promise<{ access_token: string; expire_in: string }> {
   const res = await fetch(`${API_BASE}/auth/token/long-lived`, {
     method: 'POST',
     headers: authHeaders(undefined, '1.0'),
     body: JSON.stringify({
       grant_type: 'authorization_code',
       client_id: SYSTEM_KEY,
-      redirect_uri: REDIRECT_URI,
+      redirect_uri: redirectUri,
       code,
       client_secret: SECRET_KEY,
     }),

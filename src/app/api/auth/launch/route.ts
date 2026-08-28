@@ -20,7 +20,10 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const { access_token } = await exchangeLongLived(code);
+    // redirect_uri는 고도몰 개발자센터 "redirect URI" 필드 등록값과 정확히 일치해야 한다(A0003).
+    // 환경변수가 없으면 현재 경로(/api/auth/launch) 기준으로 만든다 — 등록 redirect URI와 같은 경로다.
+    const redirectUri = process.env.GODOMALL_REDIRECT_URI || `${new URL(req.url).origin}/api/auth/launch`;
+    const { access_token } = await exchangeLongLived(code, redirectUri);
     const profile = await getMallProfile(access_token);
 
     const res = NextResponse.redirect(new URL('/admin', req.url));
