@@ -4,6 +4,13 @@ import { useEffect, useState } from 'react';
 
 type Product = { no: number; name: string };
 type Quota = { used: number; limit: number; paid: boolean };
+type Plan = {
+  mode: 'plus' | 'free';
+  status: 'ACTIVE' | 'EXPIRED' | 'DELETED' | 'UNKNOWN';
+  expireAt: string | null;
+  price: number;
+  blockedBy: 'expired' | 'deleted' | null;
+};
 type Result = {
   dryRun?: boolean;
   count?: number;
@@ -13,6 +20,7 @@ type Result = {
   skipped?: number;
   freeRemaining?: number | null;
   paid?: boolean;
+  plan?: Plan;
   quotaExceeded?: boolean;
   used?: number;
   error?: string;
@@ -25,17 +33,55 @@ const SOURCES = [
   { value: 'etc', label: '기타' },
 ];
 
-function QuotaBar({ quota }: { quota: Quota | null }) {
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
+  const price = plan?.price ?? 9900;
+  if (plan?.mode === 'plus') {
+    return (
+      <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
+        <p className="text-sm font-semibold text-amber-900">리뷰이사 플러스 — 무제한 이용 중</p>
+        {plan.expireAt && (
+          <p className="mt-1 text-[11px] text-amber-700">다음 결제일(만료): {fmtDate(plan.expireAt)} — 연장 결제 후 계속 이용하세요.</p>
+        )}
+      </div>
+    );
+  }
+
   const used = Math.min(quota?.used ?? 20, quota?.limit ?? 20);
   const limit = quota?.limit ?? 20;
+
+  if (plan?.blockedBy === 'expired' || plan?.blockedBy === 'deleted') {
+    return (
+      <div className="mt-4 rounded-lg border border-red-300 bg-red-50 p-4">
+        <p className="text-sm font-semibold text-red-800">
+          {plan.blockedBy === 'deleted' ? '앱이 삭제된 상태입니다. 다시 설치해 주세요.' : '유료 플랜 구독이 만료됐습니다.'}
+        </p>
+        <p className="mt-1 text-[11px] text-red-700">
+          고도몰 앱스토어에서 리뷰이사 플러스(월 {price.toLocaleString()}원)를 결제하면 다시 이용할 수 있습니다.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="mt-4 rounded-lg border border-neutral-300 bg-white p-4">
-      <p className="text-sm font-medium">무료 20건을 모두 사용했어요</p>
+      <p className="text-sm font-medium">
+        {used >= limit ? '무료 20건(쇼핑몰당)을 모두 사용했어요' : `무료 ${limit}건 중 ${used}건 사용`}
+      </p>
       <div className="mt-3 h-1.5 w-full rounded-full bg-neutral-100">
         <div className="h-1.5 rounded-full bg-black transition-all" style={{ width: `${Math.min(100, Math.round((used / limit) * 100))}%` }} />
       </div>
-      <p className="mt-1 text-[11px] text-neutral-500">무료 {limit}건 중 {used}건 사용</p>
-      <p className="mt-2 text-[11px] text-neutral-500">유료 전환은 준비 중입니다.</p>
+      <p className="mt-2 text-[11px] text-neutral-500">
+        {used >= limit
+          ? `고도몰 앱스토어에서 리뷰이사 플러스(월 ${price.toLocaleString()}원) 결제 후 다시 실행하면 무제한으로 쓸 수 있어요.`
+          : '쇼핑몰당 무료 20건까지 옮겨볼 수 있어요. 그 이상은 리뷰이사 플러스(월 9,900원)로 무제한.'}
+      </p>
     </div>
   );
 }
@@ -44,6 +90,7 @@ export default function Admin() {
   const [loading, setLoading] = useState(true);
   const [mallName, setMallName] = useState('');
   const [quota, setQuota] = useState<Quota | null>(null);
+  const [plan, setPlan] = useState<Plan | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [productNo, setProductNo] = useState<number | ''>('');
   const [source, setSource] = useState('coupang');
@@ -57,6 +104,7 @@ export default function Admin() {
       .then((d) => {
         if (d.mallNo) setMallName(`몰 #${d.mallNo}`);
         if (d.quota) setQuota(d.quota);
+        if (d.plan) setPlan(d.plan);
         if (Array.isArray(d.products)) setProducts(d.products);
       })
       .catch(() => {})
@@ -75,10 +123,12 @@ export default function Admin() {
     const res = await fetch('/api/reviews', { method: 'POST', body: fd });
     const json = await res.json();
     if (res.status === 402) {
-      setResult({ quotaExceeded: true, used: json.used });
+      setResult({ quotaExceeded: true, used: json.used, plan: json.plan ?? plan ?? undefined });
       setQuota((q) => (q ? { ...q, used: q.limit } : q));
+      if (json.plan) setPlan(json.plan);
     } else {
       setResult(json);
+      if (json.plan) setPlan(json.plan);
       if (!dry && typeof json.freeRemaining === 'number')
         setQuota((q) => (q ? { ...q, used: q.limit - json.freeRemaining } : q));
     }
@@ -172,15 +222,17 @@ export default function Admin() {
         </button>
       </div>
 
+      <PlanCard quota={quota} plan={plan} />
+
       <p className="mt-8 border-t pt-4 text-xs text-neutral-500">
-        무료로 20건까지 옮겨볼 수 있어요.{' · '}
+        쇼핑몰당 무료 20건 · 리뷰이사 플러스(무제한) 월 {plan?.price ?? 9900}원{' · '}
         <a href="/privacy" className="underline">개인정보처리방침</a>
       </p>
 
       {result && (
         <div className="mt-6 rounded bg-neutral-50 p-4 text-sm">
           {result.quotaExceeded ? (
-            <QuotaBar quota={quota} />
+            <PlanCard quota={quota} plan={result.plan ?? plan} />
           ) : result.error ? (
             <p className="text-red-600">
               {result.parsed === 0

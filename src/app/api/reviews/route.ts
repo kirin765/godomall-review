@@ -4,6 +4,8 @@ import { sessionMall } from '@/lib/launch';
 import { importReviews, type ExternalReview } from '@/lib/godomall';
 import { parseReviewFile, toDateTime, type ImportedReview } from '@/lib/reviewImport';
 import { checkQuota, addUsage, FREE_LIMIT } from '@/lib/quota';
+import { getEntitlement } from '@/lib/entitlement';
+import { PAID_PRICE } from '@/lib/payment';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -59,7 +61,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ dryRun: true, count: reviews.length, sample });
   }
 
-  const quota = await checkQuota(session.mallNo, reviews.length);
+  const ent = await getEntitlement(session.mallNo, session.accessToken);
+  const quota = await checkQuota(session.mallNo, reviews.length, ent.paid);
   if (!quota.configured) {
     return NextResponse.json(
       { error: 'review quota is not configured' },
@@ -67,7 +70,12 @@ export async function POST(req: NextRequest) {
     );
   }
   if (quota.allowed <= 0) {
-    return NextResponse.json({ quotaExceeded: true, used: quota.used, error: 'free limit reached' }, { status: 402 });
+    return NextResponse.json({
+      quotaExceeded: true,
+      used: quota.used,
+      plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE },
+      error: 'free limit reached',
+    }, { status: 402 });
   }
 
   const toWrite = reviews.slice(0, quota.allowed);
@@ -87,14 +95,15 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  if (!quota.paid) await addUsage(session.mallNo, written);
+  if (!ent.paid) await addUsage(session.mallNo, written);
 
-  const remaining = quota.paid ? null : Math.max(0, FREE_LIMIT - quota.used - written);
+  const remaining = ent.paid ? null : Math.max(0, FREE_LIMIT - quota.used - written);
   return NextResponse.json({
     parsed: reviews.length,
     written,
     skipped,
-    paid: quota.paid,
+    paid: ent.paid,
+    plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE },
     freeRemaining: remaining,
     failMessage: failMessage.slice(0, 5),
   });

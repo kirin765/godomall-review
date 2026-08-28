@@ -1,11 +1,11 @@
 import postgres from 'postgres';
 
-// 무료 20건 — 소진 후 402. 사용량 저장 DB가 없으면 등록을 중단한다.
+// 무료 20건(쇼핑몰당 평생 한도) — 소진 후 402(유료 미가입 시). paid면 무제한(사용량 집계 생략).
+// 웹훅 DELETED 시 리셋하지 않는다 — 삭제→재설치로 한도가 되살아나는 것을 막는다.
 export const FREE_LIMIT = 20;
 
-export async function checkQuota(mallNo: number, want: number) {
+export async function checkQuota(mallNo: number, want: number, paid = false) {
   const url = process.env.DATABASE_URL;
-  const paid = false; // TODO: 유료 전환 시 isPaid(mallNo)로 교체
   if (paid) return { allowed: want, paid: true, used: 0, configured: true };
   // 사용량을 저장할 수 없으면 무료 한도를 우회시키지 않고 호출자가 중단하게 한다.
   if (!url) return { allowed: 0, paid: false, used: 0, configured: false };
@@ -25,14 +25,5 @@ export async function addUsage(mallNo: number, n: number) {
   const sql = postgres(url, { max: 1 });
   await sql`insert into usage_counter (mall_id, written) values (${String(mallNo)}, ${n})
             on conflict (mall_id) do update set written = usage_counter.written + ${n}, updated_at = now()`;
-  await sql.end();
-}
-
-/** 앱 삭제 웹훅 시 사용량을 지운다. 재설치하면 무료 한도로 다시 시작한다. */
-export async function resetUsage(mallNo: number) {
-  const url = process.env.DATABASE_URL;
-  if (!url) return;
-  const sql = postgres(url, { max: 1 });
-  await sql`delete from usage_counter where mall_id = ${String(mallNo)}`;
   await sql.end();
 }
