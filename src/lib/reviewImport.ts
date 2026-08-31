@@ -18,25 +18,38 @@ export type ImportedReview = {
 const PATTERNS: Record<keyof ImportedReview, RegExp> = {
   score: /평점|별점|점수|score|rating/i,
   content: /리뷰|구매평|내용|후기|본문|상품평|코멘트|content|review/i,
-  writer: /작성자|아이디|구매자|닉네임|writer|^id$/i,
+  writer: /작성자|등록자|아이디|구매자|닉네임|writer|^id$/i,
   createdAt: /작성일|등록일|날짜|일시|date/i,
   option: /옵션|option/i,
   productName: /상품명|상품|product/i,
-  imageUrl: /이미지|사진|사진url|이미지url|리뷰사진|image|photo|url/i,
+  imageUrl: /이미지|사진|포토|영상|사진url|이미지url|리뷰사진|image|photo|video|url/i,
 };
+
+/**
+ * 같은 열을 다른 키가 먼저 가로채지 않도록 제외한다.
+ * 스마트스토어 구매평 엑셀: '리뷰구분'·'리뷰글번호'·'리뷰도움수'가 content 후보보다 앞에 있고,
+ * '구매자평점'이 writer 패턴(구매자)에, '상품번호'가 productName 패턴(상품)에 먼저 걸린다.
+ */
+function excludedFrom(key: keyof ImportedReview, header: string): boolean {
+  if (key === 'content')
+    return (
+      // '내용' 계열이 상품명 컬럼을 잡지 않게, '리뷰사진'·'포토/영상'이 content 패턴(리뷰)을 먼저 잡지 않게
+      /상품명/.test(header) ||
+      PATTERNS.imageUrl.test(header) ||
+      // '리뷰구분'·'글번호'·'도움수'·'일시'류 메타 컬럼이 본문 컬럼보다 앞에 있는데 걸리지 않게
+      /구분|글번호|번호|도움수|답글|전시|혜택|유저정보|이동일|풀필먼트/.test(header)
+    );
+  if (key === 'option') return /id/i.test(header); // 쿠팡의 노출상품ID(옵션ID)가 옵션으로 오인되지 않게
+  if (key === 'imageUrl') return /상품명|노출상품|옵션/.test(header); // 상품 URL·옵션ID 컬럼이 이미지 컬럼으로 오인되지 않게
+  if (key === 'writer') return /평점|별점|점수|rating/.test(header); // '구매자평점'이 작성자로 잡히지 않게
+  if (key === 'productName') return /번호|id/i.test(header); // '상품번호'·'노출상품ID'가 상품명으로 잡히지 않게
+  return false;
+}
 
 function pickColumns(headers: string[]) {
   const map: Partial<Record<keyof ImportedReview, number>> = {};
   (Object.keys(PATTERNS) as (keyof ImportedReview)[]).forEach((key) => {
-    // '내용' 계열이 상품명 컬럼을, 옵션이 쿠팡의 옵션ID 컬럼을 잡지 않게 피한다
-    const i = headers.findIndex(
-      (h) =>
-        PATTERNS[key].test(h) &&
-        !(key === 'content' && /상품명/.test(h)) &&
-        !(key === 'content' && PATTERNS.imageUrl.test(h)) &&
-        !(key === 'option' && /id/i.test(h)) &&
-        !(key === 'imageUrl' && /상품명|노출상품|옵션/.test(h)),
-    );
+    const i = headers.findIndex((h) => PATTERNS[key].test(h) && !excludedFrom(key, h));
     if (i >= 0) map[key] = i;
   });
   return map;
