@@ -104,3 +104,42 @@ export async function importReviews(token: string, reviews: ExternalReview[]): P
   if (!res.ok) throw new Error(`bulk ${res.status}: ${await res.text()}`);
   return res.json();
 }
+
+/** 외부 리뷰로 옮긴 글이 실제 상품 후기 게시판(goodsreview)의 어느 글 번호인지 알아내는 조회. */
+export type GoodsReviewArticle = {
+  sno: number;
+  writerName: string;
+  subject: string;
+  content: string;
+  goodsSno: number;
+  rating: number | null;
+  attachments?: { url: string }[] | null;
+  registerDateTime: string | null;
+};
+
+/**
+ * 상품 후기 게시글 리스트 조회. 등록일(registerDateTime) 구간 필터만 지원하고
+ * 상품·작성자 필터는 없다 → 옮긴 글을 다시 찾으려면 시간 창으로 내려받아 대조한다.
+ */
+export async function listGoodsReviewArticles(
+  token: string,
+  opts: { registerStartDate?: string; registerEndDate?: string; page?: number; pageSize?: number } = {},
+): Promise<{ totalCount: number; contents: GoodsReviewArticle[] }> {
+  const q = new URLSearchParams();
+  if (opts.registerStartDate) q.set('registerStartDate', opts.registerStartDate);
+  if (opts.registerEndDate) q.set('registerEndDate', opts.registerEndDate);
+  if (opts.page) q.set('page', String(opts.page));
+  if (opts.pageSize) q.set('pageSize', String(opts.pageSize));
+  const res = await fetch(`${API_BASE}/boards/goodsreview/articles?${q}`, { headers: authHeaders(token) });
+  if (!res.ok) throw new Error(`goodsreview articles ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+/** 게시글 삭제(204). 상품 후기는 boardId='goodsreview'. 실측으로 204/404 동작을 확인할 것. */
+export async function deleteBoardArticle(token: string, boardId: string, articleSno: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/boards/${boardId}/articles/${articleSno}`, {
+    method: 'DELETE',
+    headers: authHeaders(token),
+  });
+  if (!res.ok) throw new Error(`delete article ${res.status}: ${await res.text()}`);
+}

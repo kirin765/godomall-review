@@ -1,9 +1,20 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 type Product = { no: number; name: string };
 type Quota = { used: number; limit: number; paid: boolean };
+type ImportedReview = {
+  import_key: string;
+  article_sno: number | null;
+  goods_no: number;
+  writer: string;
+  score: number;
+  content: string;
+  image_url: string | null;
+  created_date: string | null;
+  imported_at: string;
+};
 type Plan = {
   mode: 'plus' | 'free';
   status: 'ACTIVE' | 'EXPIRED' | 'DELETED' | 'UNKNOWN';
@@ -97,6 +108,12 @@ export default function Admin() {
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
+  const [imports, setImports] = useState<ImportedReview[] | null>(null);
+  const [importedError, setImportedError] = useState('');
+  const [importedMsg, setImportedMsg] = useState('');
+  const [filterProduct, setFilterProduct] = useState<number | ''>('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [delBusy, setDelBusy] = useState(false);
 
   useEffect(() => {
     fetch('/api/goods')
@@ -110,6 +127,28 @@ export default function Admin() {
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);
+
+  const loadImports = useCallback((productNo: number | '') => {
+    setImportedError('');
+    setImportedMsg('');
+    const q = productNo ? `?product_no=${productNo}` : '';
+    fetch(`/api/imports${q}`)
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error ?? '목록을 불러오지 못했습니다.');
+        setImports(d.reviews ?? []);
+      })
+      .catch((e: Error) => {
+        setImportedError(e.message);
+        setImports([]);
+      });
+  }, []);
+
+  useEffect(() => {
+    // 최초 마운트 시 1회 로드 — 로딩 상태로 시작하는 것이 의도된 동작이다.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadImports('');
+  }, [loadImports]);
 
   async function run(dry: boolean) {
     if (!file || !productNo) return;
@@ -131,8 +170,45 @@ export default function Admin() {
       if (json.plan) setPlan(json.plan);
       if (!dry && typeof json.freeRemaining === 'number')
         setQuota((q) => (q ? { ...q, used: q.limit - json.freeRemaining } : q));
+      // 옮기기 성공 — 옮긴 리뷰 목록을 갱신한다 (방금 옮긴 글이 목록에 보여야 함).
+      if (!dry && (json.written ?? 0) > 0) {
+        setFilterProduct('');
+        loadImports('');
+      }
     }
     setBusy(false);
+  }
+
+  async function deleteImports(snos: number[]) {
+    if (!snos.length || delBusy) return;
+    setDelBusy(true);
+    setImportedMsg('');
+    setImportedError('');
+    try {
+      const res = await fetch('/api/imports', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ article_snos: snos }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setImportedError(json.error ?? '삭제하지 못했습니다.');
+        return;
+      }
+      const deleted: number[] = json.deleted ?? [];
+      const failed: { article_sno: number; error: string }[] = json.failed ?? [];
+      setImportedMsg(
+        failed.length
+          ? `삭제 완료 ${deleted.length}건 · 실패 ${failed.length}건 (${failed[0].error})`
+          : `삭제 완료 ${deleted.length}건`,
+      );
+      if (deleted.length) {
+        await loadImports(filterProduct);
+        setSelected(new Set());
+      }
+    } finally {
+      setDelBusy(false);
+    }
   }
 
   async function useSample() {
@@ -271,6 +347,121 @@ export default function Admin() {
           )}
         </div>
       )}
+
+      {/* 리뷰이사가 옮긴 리뷰 관리 — 옮긴 글을 기록해 두고 필터·삭제할 수 있다 */}
+      <div className="mt-8 border-t pt-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold">리뷰이사가 옮긴 리뷰 관리</h2>
+          <button
+            onClick={() => loadImports(filterProduct)}
+            className="rounded border px-3 py-1 text-xs hover:bg-neutral-50"
+          >
+            새로고침
+          </button>
+        </div>
+        <p className="mt-1 text-xs text-neutral-500">
+          이 배포 이후 옮긴 리뷰만 기록됩니다. 삭제하면 쇼핑몰 게시판에서도 함께 지워집니다.
+        </p>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <select
+            className="rounded border p-1.5 text-xs"
+            value={filterProduct}
+            onChange={(e) => {
+              const v = Number(e.target.value) || '';
+              setFilterProduct(v);
+              loadImports(v);
+            }}
+          >
+            <option value="">전체 상품</option>
+            {products.map((p) => (
+              <option key={p.no} value={p.no}>
+                [{p.no}] {p.name}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() =>
+              deleteImports(
+                (imports ?? [])
+                  .filter((r) => r.article_sno != null && selected.has(r.import_key))
+                  .map((r) => r.article_sno as number),
+              )
+            }
+            disabled={delBusy || selected.size === 0}
+            className="rounded bg-black px-3 py-1.5 text-xs text-white disabled:opacity-40"
+          >
+            선택 삭제 ({selected.size})
+          </button>
+          <button
+            onClick={() => {
+              const snos = (imports ?? [])
+                .filter((r) => r.article_sno != null)
+                .map((r) => r.article_sno as number);
+              if (
+                !snos.length ||
+                !window.confirm('현재 목록의 리뷰를 모두 삭제할까요? 쇼핑몰 게시판에서도 함께 삭제됩니다.')
+              )
+                return;
+              deleteImports(snos);
+            }}
+            disabled={delBusy || !(imports ?? []).some((r) => r.article_sno != null)}
+            className="rounded border px-3 py-1.5 text-xs text-red-600 disabled:opacity-40"
+          >
+            전체 삭제
+          </button>
+          {delBusy && <span className="text-xs text-neutral-500">삭제하는 중…</span>}
+        </div>
+
+        {importedError && <p className="mt-2 text-xs text-red-600">{importedError}</p>}
+        {importedMsg && <p className="mt-2 text-xs text-neutral-600">{importedMsg}</p>}
+
+        {imports === null ? (
+          <p className="mt-3 text-xs text-neutral-400">목록을 불러오는 중입니다…</p>
+        ) : imports.length === 0 ? (
+          <p className="mt-3 text-xs text-neutral-400">
+            기록된 리뷰가 없습니다. (이 배포 이후 옮긴 리뷰부터 표시됩니다)
+          </p>
+        ) : (
+          <ul className="mt-3 max-h-72 space-y-1.5 overflow-y-auto text-xs">
+            {imports.map((r) => {
+              const pname = products.find((p) => p.no === r.goods_no)?.name ?? `상품 ${r.goods_no}`;
+              const confirmed = r.article_sno != null;
+              return (
+                <li key={r.import_key} className="flex items-start gap-2 rounded border bg-white p-2">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(r.import_key)}
+                    disabled={!confirmed}
+                    onChange={(e) =>
+                      setSelected((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) next.add(r.import_key);
+                        else next.delete(r.import_key);
+                        return next;
+                      })
+                    }
+                    className="mt-0.5"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-neutral-800">
+                      <span className="font-medium">{pname}</span>
+                      <span className="text-amber-500"> ★{r.score}</span>
+                      {' · '}
+                      <span>{r.writer}</span>
+                    </div>
+                    <div className="mt-0.5 text-neutral-400">
+                      {confirmed ? `글번호 ${r.article_sno}` : '등록 확인 안 됨 (게시판 반영 전)'}
+                      {r.created_date ? ` · 원 작성일 ${r.created_date}` : ''}
+                      {' · '}옮긴 시각 {new Date(r.imported_at).toLocaleString('ko-KR')}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
     </main>
   );
 }
