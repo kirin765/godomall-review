@@ -3,7 +3,7 @@ import { sessionMall } from '@/lib/launch';
 import { listGoods, APP_NO } from '@/lib/godomall';
 import { checkQuota } from '@/lib/quota';
 import { getEntitlement } from '@/lib/entitlement';
-import { PAID_PRICE } from '@/lib/payment';
+import { PAID_PRICE, PAYMENT_INFO } from '@/lib/payment';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -17,6 +17,29 @@ function appStoreUrl(): string | null {
 export async function GET(req: NextRequest) {
   const session = await sessionMall();
   if (!session) return NextResponse.json({ error: 'no session' }, { status: 401 });
+
+  // 로컬 개발 전용: 개발 모드에서는 워크스페이스/고도몰 호출 없이 관리 화면이 렌더링되게 목 데이터를 내려준다.
+  // NODE_ENV='production' 빌드에는 이 분기가 들어가지 않는다 — 심사·운영 영향 없음.
+  if (process.env.NODE_ENV === 'development') {
+    return NextResponse.json({
+      mallNo: session.mallNo,
+      quota: { used: 3, limit: 20, paid: false },
+      plan: {
+        mode: 'free',
+        status: 'ACTIVE',
+        expireAt: null,
+        price: PAID_PRICE,
+        blockedBy: null,
+        storeUrl: appStoreUrl(),
+        payment: PAYMENT_INFO,
+      },
+      products: [
+        { no: 1001, name: '[온누리문방구] 스프링 노트 A5 5권 세트' },
+        { no: 1002, name: '[온누리문방구] 제브라 볼펜 0.5mm 10입' },
+        { no: 1003, name: '[온누리문방구] 3M 포스트잇 656 12팩' },
+      ],
+    });
+  }
 
   const page = Number(req.nextUrl.searchParams.get('page') || '1');
   const ent = await getEntitlement(session.mallNo, session.accessToken);
@@ -45,6 +68,8 @@ export async function GET(req: NextRequest) {
       blockedBy: ent.status === 'EXPIRED' ? 'expired' : ent.status === 'DELETED' ? 'deleted' : null,
       /** 앱스토어 구매 페이지 — 관리 화면의 "결제 안내" 문구에 링크로 연결한다 */
       storeUrl: appStoreUrl(),
+      /** 수동 계좌이체 결제 안내 — 관리 화면이 이 정보로 계좌·금액·연락처를 보여준다 */
+      payment: PAYMENT_INFO,
     },
     products,
     goodsError,

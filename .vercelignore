@@ -1,0 +1,3 @@
+# 빌드에 .env 시크릿이 안 실리게 한다 — Vercel 대시보드 env가 운영 값을 공급한다
+.env*
+!.env.example

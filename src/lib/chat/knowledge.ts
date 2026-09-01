@@ -15,6 +15,14 @@ const SUPPORT = {
   supportUrl: '/support',
 };
 
+/** 수동 계좌이체 결제 정보 — 앱스토어에 결제 수단이 없어 셀러↔몰 직거래로 수신한다 (사용자 확정, 2026-09-02) */
+const PAYMENT = {
+  price: '월 9,900원(부가세 포함)',
+  bank: '토스뱅크',
+  account: '1002-5844-8101',
+  holder: '온누리문방구',
+};
+
 /** 플랫폼별 정보 — 이 객체만 플랫폼마다 다르다 */
 const PLATFORM = {
   name: '고도몰',
@@ -25,9 +33,9 @@ const PLATFORM = {
   freeQuota: 20,
   /** 현재 앱 상태 — 고객에게 안내할 문구 */
   status:
-    '무료 20건까지 리뷰를 옮길 수 있고, 리뷰이사 플러스(월 9,900원)로 무제한 이용할 수 있습니다. ' +
-    '결제는 고도몰 앱스토어에서 진행되며, 결제 후 앱을 다시 실행하면 자동으로 플러스가 적용됩니다.',
-  priceNote: '월 9,900원 (리뷰이사 플러스)',
+    '무료 20건까지 리뷰를 옮길 수 있고, 리뷰이사 플러스(' + PAYMENT.price + ')로 무제한 이용할 수 있습니다. ' +
+    `결제는 계좌이체(${PAYMENT.bank} ${PAYMENT.account}, 예금주 ${PAYMENT.holder})로 받으며, 입금 확인 후 무제한으로 전환해 드립니다.`,
+  priceNote: PAYMENT.price + ' (리뷰이사 플러스)',
 };
 
 /** 상황 → 안내. 챗봇은 이 표를 참고해 답한다 (추측 금지). */
@@ -36,7 +44,8 @@ const ERROR_GUIDES: { when: string; guide: string }[] = [
     when: '무료 한도 소진 — "무료 20건을 모두 사용했어요" / 402 / 남은 건수 0',
     guide:
       `무료 ${PLATFORM.freeQuota}건을 모두 사용하면 더 이상 등록되지 않습니다. ` +
-      `고도몰 앱스토어에서 리뷰이사 플러스(월 9,900원)를 결제한 뒤 앱을 다시 실행하면 무제한으로 이어서 옮길 수 있습니다. ` +
+      `리뷰이사 플러스(${PAYMENT.price})로 전환하면 무제한으로 이어서 옮길 수 있습니다. ` +
+      `결제는 계좌이체(${PAYMENT.bank} ${PAYMENT.account}, 예금주 ${PAYMENT.holder})로 받으며, 입금 후 ${SUPPORT.supportEmail}로 입금자명을 알려주시면 확인 후 무제한으로 전환해 드립니다. ` +
       `결제·이용 중 문제가 있으면 ${SUPPORT.supportEmail}로 문의해 주세요.`,
   },
   {
@@ -61,8 +70,9 @@ const ERROR_GUIDES: { when: string; guide: string }[] = [
   {
     when: '유료·결제 문의 — "유료는 언제?", "결제 되나요?", "월 요금은?"',
     guide:
-      `리뷰이사 플러스는 월 9,900원(부가세 별도)·월간 구독입니다. 가입은 고도몰 앱스토어의 리뷰이사 상세 페이지에서 결제하면 되고, ` +
-      `결제 후 앱을 다시 실행하면 무제한 이용으로 전환됩니다. 무료 ${PLATFORM.freeQuota}건은 가입 없이 누구나 사용할 수 있습니다. ` +
+      `리뷰이사 플러스는 ${PAYMENT.price}·월간 구독입니다. 결제는 계좌이체(${PAYMENT.bank} ${PAYMENT.account}, 예금주 ${PAYMENT.holder})로 받으며, ` +
+      `입금 후 ${SUPPORT.supportEmail}로 입금자명을 알려주시면 확인 후 무제한 이용으로 전환해 드립니다. 세금계산서가 필요하면 함께 요청해 주세요. ` +
+      `무료 ${PLATFORM.freeQuota}건은 가입 없이 누구나 사용할 수 있습니다. ` +
       `환불·일정 등 자세한 내용은 ${SUPPORT.supportEmail}로 문의해 주세요.`,
   },
   {

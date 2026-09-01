@@ -15,14 +15,24 @@ type ImportedReview = {
   created_date: string | null;
   imported_at: string;
 };
+type PaymentInfo = {
+  method?: string;
+  bank?: string;
+  account?: string;
+  holder?: string;
+  vatIncluded?: boolean;
+  contactEmail?: string;
+};
 type Plan = {
   mode: 'plus' | 'free';
   status: 'ACTIVE' | 'EXPIRED' | 'DELETED' | 'UNKNOWN';
   expireAt: string | null;
   price: number;
   blockedBy: 'expired' | 'deleted' | null;
-  /** 앱스토어 앱 상세 URL — 여기에서 리뷰이사 플러스를 결제한다. 없으면 결제 문구를 링크 없이 보여준다. */
+  /** 앱스토어 앱 상세 URL — 없으면 결제 문구를 링크 없이 보여준다. */
   storeUrl: string | null;
+  /** 수동 계좌이체 결제 안내 — 계좌·금액·연락처 */
+  payment?: PaymentInfo | null;
 };
 type Result = {
   dryRun?: boolean;
@@ -62,18 +72,27 @@ function fmtDate(iso: string | null | undefined): string {
   return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/** 수동 계좌이체 결제 안내 블록 — plan.payment가 있으면 계좌/금액/연락처를 보여준다 */
+function BankPay({ pay, price }: { pay: PaymentInfo; price: number }) {
+  if (pay.method !== 'bank' || !pay.account) return null;
+  const vatLabel = pay.vatIncluded ? `${price.toLocaleString()}원(부가세 포함)` : `${price.toLocaleString()}원(부가세 별도)`;
+  return (
+    <div className="mt-3 rounded border border-dashed border-neutral-300 bg-white p-3 text-[11px] text-neutral-700">
+      <p className="font-medium text-neutral-900">계좌이체로 결제 — 월 {vatLabel}</p>
+      <p className="mt-1">
+        입금 계좌: <span className="font-semibold">{pay.bank} {pay.account}</span> (예금주 {pay.holder})
+      </p>
+      <p className="mt-1">
+        이체 후 {pay.contactEmail ?? '판매사'}로 입금자명을 알려주시면 확인 후 무제한으로 전환해 드립니다.
+        <br />세금계산서가 필요하시면 이체와 함께 요청해 주세요.
+      </p>
+    </div>
+  );
+}
+
 function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
   const price = plan?.price ?? 9900;
-  const storeHref = plan?.storeUrl;
-  /** "고도몰 앱스토어" 문구를 구매 페이지 링크로 만든다 (URL 없으면 평문). */
-  const Store = ({ children }: { children: React.ReactNode }) =>
-    storeHref ? (
-      <a href={storeHref} target="_blank" rel="noreferrer" className="underline">
-        {children}
-      </a>
-    ) : (
-      <span>{children}</span>
-    );
+  const pay = plan?.payment;
 
   if (plan?.mode === 'plus') {
     return (
@@ -82,6 +101,7 @@ function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
         {plan.expireAt && (
           <p className="mt-1 text-[11px] text-amber-700">다음 결제일(만료): {fmtDate(plan.expireAt)} — 연장 결제 후 계속 이용하세요.</p>
         )}
+        {pay && <BankPay pay={pay} price={price} />}
       </div>
     );
   }
@@ -93,11 +113,12 @@ function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
     return (
       <div className="mt-4 rounded-lg border border-red-300 bg-red-50 p-4">
         <p className="text-sm font-semibold text-red-800">
-          {plan.blockedBy === 'deleted' ? '앱이 삭제된 상태입니다. 다시 설치해 주세요.' : '유료 플랜 구독이 만료됐습니다.'}
+          {plan.blockedBy === 'deleted' ? '앱이 삭제된 상태입니다. 다시 설치해 주세요.' : '유료 플랜 이용 기간이 끝났습니다.'}
         </p>
         <p className="mt-1 text-[11px] text-red-700">
-          <Store>고도몰 앱스토어</Store>에서 리뷰이사 플러스(월 {price.toLocaleString()}원)를 결제하면 다시 이용할 수 있습니다.
+          리뷰이사 플러스(월 {price.toLocaleString()}원)를 연장하면 다시 이용할 수 있습니다.
         </p>
+        {pay && <BankPay pay={pay} price={price} />}
       </div>
     );
   }
@@ -112,13 +133,10 @@ function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
       </div>
       <p className="mt-2 text-[11px] text-neutral-500">
         {used >= limit
-          ? (
-            <>
-              <Store>고도몰 앱스토어</Store>에서 리뷰이사 플러스(월 {price.toLocaleString()}원) 결제 후 다시 실행하면 무제한으로 쓸 수 있어요.
-            </>
-          )
+          ? '리뷰이사 플러스(월 9,900원, 부가세 포함)로 전환하면 무제한으로 쓸 수 있어요. 아래 계좌로 이체 후 입금자명을 알려주세요.'
           : '쇼핑몰당 무료 20건까지 옮겨볼 수 있어요. 그 이상은 리뷰이사 플러스(월 9,900원)로 무제한.'}
       </p>
+      {pay && used >= limit && <BankPay pay={pay} price={price} />}
     </div>
   );
 }
@@ -252,9 +270,10 @@ export default function Admin() {
     return <main className="p-8 text-sm">고도몰 관리자에서 앱을 실행해 주세요.</main>;
 
   return (
-    <main className="mx-auto max-w-2xl p-6 font-sans">
-      <h1 className="text-lg font-semibold">리뷰 옮기기</h1>
-      <p className="mt-1 text-xs text-neutral-500">{mallName}</p>
+    <main className="p-6 font-sans">
+      <div className="mx-auto w-full max-w-xl">
+        <h1 className="text-lg font-semibold">리뷰 옮기기</h1>
+        <p className="mt-1 text-xs text-neutral-500">{mallName}</p>
 
       {goodsError && (
         <p className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-[11px] text-red-700">
@@ -335,7 +354,7 @@ export default function Admin() {
       <PlanCard quota={quota} plan={plan} />
 
       <p className="mt-8 border-t pt-4 text-xs text-neutral-500">
-        쇼핑몰당 무료 20건 · 리뷰이사 플러스(무제한) 월 {plan?.price ?? 9900}원{' · '}
+        쇼핑몰당 무료 20건 · 리뷰이사 플러스(무제한) 월 9,900원(부가세 포함){' · '}
         <a href="/privacy" className="underline">개인정보처리방침</a>
       </p>
 
@@ -496,6 +515,30 @@ export default function Admin() {
           </ul>
         )}
       </div>
+      </div>
+
+      {/* 프로모션 — 데스크톱(xl 이상)에서는 오른쪽에 떠 있고, 그보다 좁은 화면에서는 폼 아래로 내려온다 */}
+      <aside className="mt-8 rounded-lg border border-neutral-300 bg-white p-4 md:mx-auto md:w-full md:max-w-xl xl:fixed xl:right-6 xl:top-6 xl:z-10 xl:mx-0 xl:mt-0 xl:w-64 xl:max-w-none">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
+          리뷰이사 추천
+        </p>
+        <p className="mt-2 text-sm font-semibold">ReviewBoost 리뷰 수집기</p>
+        <p className="mt-2 text-xs leading-relaxed text-neutral-600">
+          쿠팡·스마트스토어 상품 페이지에서 그 상품의 리뷰를 버튼 한 번으로 엑셀(.xlsx)로
+          내려받는 무료 브라우저 확장 프로그램입니다. 스마트스토어 판매자센터 공식 리뷰 엑셀
+          25열 형식으로 저장되어 이 앱에 그대로 올릴 수 있어요. (무료 분석 리포트 연동도
+          지원합니다)
+        </p>
+        <a
+          href="https://chromewebstore.google.com/detail/kdmjkpfbccikgbaemcbifemeichmehlm"
+          target="_blank"
+          rel="noreferrer"
+          className="mt-3 block rounded bg-black px-4 py-2 text-center text-sm text-white"
+        >
+          Chrome 웹스토어에서 설치하기
+        </a>
+        <p className="mt-2 text-[11px] text-neutral-400">무료 · Chrome/Edge/웨일 지원</p>
+      </aside>
     </main>
   );
 }

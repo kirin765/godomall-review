@@ -97,8 +97,30 @@ export async function extendAppStatus(accessToken: string, params: ExtendParams)
 }
 
 /** 결제/만료 주기 상수 — 판매정보(인앱결제 가격 정보)와 일치시킬 것 */
+/**
+ * 리뷰이사 플러스 요금 — 9,900원(부가세 포함). 공급가액 9,000원 + 부가세 900원.
+ * 몰이 납부하는 총액이므로 워크스페이스 extend의 price로 그대로 전달한다.
+ */
 export const PAID_PRICE = Number(process.env.GODO_PAID_PRICE || '9900');
 export const PAID_MONTHS = Number(process.env.GODO_PAID_MONTHS || '1');
+
+/**
+ * 수동 계좌이체 결제 안내 — 앱스토어에 가격·결제 폼이 없어 셀러↔몰 직거래로 수신한다
+ * (2026-09-02 사용자 확정: 결제 방식 = 수동 계좌이체, 9,900원 부가세 포함).
+ * 관리 화면 plan에 그대로 내려 고객에게 계좌이체 절차를 안내한다.
+ */
+export const PAYMENT_INFO = {
+  method: 'bank' as const,
+  bank: '토스뱅크',
+  account: '1002-5844-8101',
+  holder: '온누리문방구',
+  /** 부가세 포함 여부 — true면 PAID_PRICE가 총액(세금 포함) */
+  vatIncluded: true,
+  /** 입금 후 연락처 — 이곳으로 입금자명·몰을 알려주면 수동으로 전환한다 */
+  contactEmail: process.env.SUPPORT_EMAIL || 'kwan765@naver.com',
+} as const;
+
+export type PaymentInfo = typeof PAYMENT_INFO;
 
 /** "yyyy-MM-dd HH:mm:ss" → Date */
 export function parseWorkspaceDate(s?: string): Date | null {

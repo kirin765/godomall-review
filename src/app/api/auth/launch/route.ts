@@ -27,6 +27,15 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'invalid launch' }, { status: 400 });
   }
 
+  // 로컬 개발 전용: 개발 모드에서는 고도몰 OAuth를 건너뛰고 곧바로 세션을 발급해
+  // 관리 화면을 볼 수 있게 한다 (diag 라우트 등으로 만든 launch URL을 localhost로 열면 된다).
+  // NODE_ENV='production' 빌드에는 이 분기가 들어가지 않는다 — 심사·운영 흐름 영향 없음.
+  if (process.env.NODE_ENV === 'development') {
+    const res = NextResponse.redirect(new URL('/admin', req.url));
+    res.cookies.set(sessionCookie(1, 'dev-token'));
+    return res;
+  }
+
   try {
     // redirect_uri는 고도몰 개발자센터 "redirect URI" 필드 등록값과 정확히 일치해야 한다(A0003).
     // 환경변수가 없으면 현재 경로(/api/auth/launch) 기준으로 만든다 — 등록 redirect URI와 같은 경로다.

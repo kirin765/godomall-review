@@ -5,7 +5,7 @@ import { importReviews, APP_NO, type ExternalReview } from '@/lib/godomall';
 import { parseReviewFile, toDateTime, type ImportedReview } from '@/lib/reviewImport';
 import { checkQuota, addUsage, FREE_LIMIT } from '@/lib/quota';
 import { getEntitlement } from '@/lib/entitlement';
-import { PAID_PRICE } from '@/lib/payment';
+import { PAID_PRICE, PAYMENT_INFO } from '@/lib/payment';
 import { recordImports, reconcileImports, type NewImport } from '@/lib/imports';
 
 export const runtime = 'nodejs';
@@ -91,7 +91,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       quotaExceeded: true,
       used: quota.used,
-      plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE, storeUrl: appStoreUrl() },
+      plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE, storeUrl: appStoreUrl(), payment: PAYMENT_INFO },
       error: 'free limit reached',
     }, { status: 402 });
   }
@@ -134,7 +134,7 @@ export async function POST(req: NextRequest) {
     written,
     skipped,
     paid: ent.paid,
-    plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE, storeUrl: appStoreUrl() },
+    plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE, storeUrl: appStoreUrl(), payment: PAYMENT_INFO },
     freeRemaining: remaining,
     failMessage: failMessage.slice(0, 5),
   });
