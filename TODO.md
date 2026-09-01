@@ -8,7 +8,7 @@
 - [x] Replace the hardcoded `paid = false` quota decision with app-installation expiry checks. (`checkQuota(mallNo, want, paid)`)
 - [x] Add paid expiry, payment, expired, uninstall, reinstall, and refund handling to the UI and webhook flow. (관리 화면 플랜 카드, 웹훅 DELETED 시 토큰/캐시 정리)
 - [x] Register the app as a NHN Commerce `판매앱` or convert the existing private app. (콘솔 작업 — 사용자)
-- [x] Configure `판매정보`: payment type `인앱결제`, price, billing period, free trial/free features, refund policy, product information disclosure, support contact, and manual. (폼 작성 — 아래 초안 참고)
+- [ ] Configure `판매정보`: payment type `인앱결제`, price, billing period, free trial/free features, refund policy, product information disclosure, support contact, and manual. (폼 작성 — 아래 초안 참고) — **미완료 확정 (2026-09-01): 앱스토어 상세에 [설치하기]만 있고 가격/결제 섹션이 없음. 승인 ≠ 결제 상품 등록**
 - [x] Store platform, solution type, and app installation identity in the signed session. (몰 토큰은 app_tokens DB에 저장 중; 세션에 platform/solution 저장은 미완)
 - [ ] Keep usage history after uninstall; do not reset the free quota on reinstall because NHN free trials are available only once. (현재 DELETED 시 usage 초기화 — 비즈니스 모델 확정 후 재검토)
 - [x] Submit the 판매앱 review request with test access, supported platform details, payment instructions, screenshots, privacy policy, and support information. (승인됨 — 사용자)
@@ -19,6 +19,11 @@
 판매정보 관리/결제 설정 화면에서 확인해야 한다. `/api/payment/webhook`(X-API-Key)과
 `/api/payment/extend`(관리자 세션) 두 경로를 만들어 두었으니, 실제 콘솔에서 결제 완료 시그널을
 확인한 뒤 payload 매핑(mallNo/shopNo/orderNo)만 맞추면 된다.
+
+**실측 (2026-09-01)**: 앱스토어 상세에 가격/결제 섹션이 전혀 안 보임 → 판매정보 관리에서
+결제방식(인앱결제)·상품(리뷰이사 플러스 월 9,900원)·결제완료 콜백 URL 등록이 선행돼야 한다.
+등록 전까지는 몰 설치가 EXPIRED(결제대기)로 떠도 결제 수단이 없어 영구 대기 상태다.
+(우리 서버에서 직접 extend하면 수동으로 ACTIVE 전환은 가능 — 테스트 검증 완료)
 
 References:
 

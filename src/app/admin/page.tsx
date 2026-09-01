@@ -21,6 +21,8 @@ type Plan = {
   expireAt: string | null;
   price: number;
   blockedBy: 'expired' | 'deleted' | null;
+  /** 앱스토어 앱 상세 URL — 여기에서 리뷰이사 플러스를 결제한다. 없으면 결제 문구를 링크 없이 보여준다. */
+  storeUrl: string | null;
 };
 type Result = {
   dryRun?: boolean;
@@ -38,6 +40,15 @@ type Result = {
   headers?: string[];
 };
 
+type GoodsPayload = {
+  mallNo: number;
+  quota: Quota;
+  plan: Plan;
+  products: Product[];
+  /** 만료/삭제 상태에서 godomall server API가 상품 목록을 거부할 때의 메시지 (SA0010 등) */
+  goodsError?: string | null;
+};
+
 const SOURCES = [
   { value: 'coupang', label: '쿠팡' },
   { value: 'smartstore', label: '네이버 스마트스토어' },
@@ -53,6 +64,17 @@ function fmtDate(iso: string | null | undefined): string {
 
 function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
   const price = plan?.price ?? 9900;
+  const storeHref = plan?.storeUrl;
+  /** "고도몰 앱스토어" 문구를 구매 페이지 링크로 만든다 (URL 없으면 평문). */
+  const Store = ({ children }: { children: React.ReactNode }) =>
+    storeHref ? (
+      <a href={storeHref} target="_blank" rel="noreferrer" className="underline">
+        {children}
+      </a>
+    ) : (
+      <span>{children}</span>
+    );
+
   if (plan?.mode === 'plus') {
     return (
       <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
@@ -74,7 +96,7 @@ function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
           {plan.blockedBy === 'deleted' ? '앱이 삭제된 상태입니다. 다시 설치해 주세요.' : '유료 플랜 구독이 만료됐습니다.'}
         </p>
         <p className="mt-1 text-[11px] text-red-700">
-          고도몰 앱스토어에서 리뷰이사 플러스(월 {price.toLocaleString()}원)를 결제하면 다시 이용할 수 있습니다.
+          <Store>고도몰 앱스토어</Store>에서 리뷰이사 플러스(월 {price.toLocaleString()}원)를 결제하면 다시 이용할 수 있습니다.
         </p>
       </div>
     );
@@ -90,7 +112,11 @@ function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
       </div>
       <p className="mt-2 text-[11px] text-neutral-500">
         {used >= limit
-          ? `고도몰 앱스토어에서 리뷰이사 플러스(월 ${price.toLocaleString()}원) 결제 후 다시 실행하면 무제한으로 쓸 수 있어요.`
+          ? (
+            <>
+              <Store>고도몰 앱스토어</Store>에서 리뷰이사 플러스(월 {price.toLocaleString()}원) 결제 후 다시 실행하면 무제한으로 쓸 수 있어요.
+            </>
+          )
           : '쇼핑몰당 무료 20건까지 옮겨볼 수 있어요. 그 이상은 리뷰이사 플러스(월 9,900원)로 무제한.'}
       </p>
     </div>
@@ -102,6 +128,7 @@ export default function Admin() {
   const [mallName, setMallName] = useState('');
   const [quota, setQuota] = useState<Quota | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
+  const [goodsError, setGoodsError] = useState<string | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [productNo, setProductNo] = useState<number | ''>('');
   const [source, setSource] = useState('coupang');
@@ -122,6 +149,7 @@ export default function Admin() {
         if (d.mallNo) setMallName(`몰 #${d.mallNo}`);
         if (d.quota) setQuota(d.quota);
         if (d.plan) setPlan(d.plan);
+        if (d.goodsError) setGoodsError(d.goodsError);
         if (Array.isArray(d.products)) setProducts(d.products);
       })
       .catch(() => {})
@@ -227,6 +255,12 @@ export default function Admin() {
     <main className="mx-auto max-w-2xl p-6 font-sans">
       <h1 className="text-lg font-semibold">리뷰 옮기기</h1>
       <p className="mt-1 text-xs text-neutral-500">{mallName}</p>
+
+      {goodsError && (
+        <p className="mt-2 rounded border border-red-200 bg-red-50 p-2 text-[11px] text-red-700">
+          상품 목록을 불러오지 못했습니다: {goodsError}
+        </p>
+      )}
 
       <ol className="mt-6 space-y-5 text-sm">
         <li>

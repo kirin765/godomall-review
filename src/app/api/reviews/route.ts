@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomBytes } from 'crypto';
 import { sessionMall } from '@/lib/launch';
-import { importReviews, type ExternalReview } from '@/lib/godomall';
+import { importReviews, APP_NO, type ExternalReview } from '@/lib/godomall';
 import { parseReviewFile, toDateTime, type ImportedReview } from '@/lib/reviewImport';
 import { checkQuota, addUsage, FREE_LIMIT } from '@/lib/quota';
 import { getEntitlement } from '@/lib/entitlement';
@@ -10,6 +10,11 @@ import { recordImports, reconcileImports, type NewImport } from '@/lib/imports';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+
+/** 고도몰 앱스토어의 이 앱 상세 페이지 (구매/인앱결제는 여기서). APP_NO 미설정이면 null. */
+function appStoreUrl(): string | null {
+  return APP_NO > 0 ? `https://apps.godo.co.kr/apps/${APP_NO}` : null;
+}
 
 const SOURCES: Record<string, { name: string; url: string; naver: 'Y' | 'N' }> = {
   coupang: { name: '쿠팡', url: 'https://www.coupang.com', naver: 'N' },
@@ -86,7 +91,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       quotaExceeded: true,
       used: quota.used,
-      plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE },
+      plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE, storeUrl: appStoreUrl() },
       error: 'free limit reached',
     }, { status: 402 });
   }
@@ -129,7 +134,7 @@ export async function POST(req: NextRequest) {
     written,
     skipped,
     paid: ent.paid,
-    plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE },
+    plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE, storeUrl: appStoreUrl() },
     freeRemaining: remaining,
     failMessage: failMessage.slice(0, 5),
   });
