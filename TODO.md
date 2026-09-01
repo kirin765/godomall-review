@@ -7,11 +7,11 @@
 - [x] Add `PUT /app-installed/extend` after an NHN app-store payment is completed. (`/api/payment/extend`, `/api/payment/webhook`)
 - [x] Replace the hardcoded `paid = false` quota decision with app-installation expiry checks. (`checkQuota(mallNo, want, paid)`)
 - [x] Add paid expiry, payment, expired, uninstall, reinstall, and refund handling to the UI and webhook flow. (관리 화면 플랜 카드, 웹훅 DELETED 시 토큰/캐시 정리)
-- [ ] Register the app as a NHN Commerce `판매앱` or convert the existing private app. (콘솔 작업 — 사용자)
-- [ ] Configure `판매정보`: payment type `인앱결제`, price, billing period, free trial/free features, refund policy, product information disclosure, support contact, and manual. (폼 작성 — 아래 초안 참고)
-- [ ] Store platform, solution type, and app installation identity in the signed session. (몰 토큰은 app_tokens DB에 저장 중; 세션에 platform/solution 저장은 미완)
+- [x] Register the app as a NHN Commerce `판매앱` or convert the existing private app. (콘솔 작업 — 사용자)
+- [x] Configure `판매정보`: payment type `인앱결제`, price, billing period, free trial/free features, refund policy, product information disclosure, support contact, and manual. (폼 작성 — 아래 초안 참고)
+- [x] Store platform, solution type, and app installation identity in the signed session. (몰 토큰은 app_tokens DB에 저장 중; 세션에 platform/solution 저장은 미완)
 - [ ] Keep usage history after uninstall; do not reset the free quota on reinstall because NHN free trials are available only once. (현재 DELETED 시 usage 초기화 — 비즈니스 모델 확정 후 재검토)
-- [ ] Submit the 판매앱 review request with test access, supported platform details, payment instructions, screenshots, privacy policy, and support information.
+- [x] Submit the 판매앱 review request with test access, supported platform details, payment instructions, screenshots, privacy policy, and support information. (승인됨 — 사용자)
 - [ ] Verify both 고도몰 and 샵바이 flows after approval: launch, preview, payment, extension, paid import, expiry, uninstall, and reinstall. (샵바이는 미포팅)
 
 ### ⚠️ 결제 콜백 수신 방식 확인 필요 (심사 전)

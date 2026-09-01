@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sessionMall } from '@/lib/launch';
 import { getToken, recordSubscription, saveToken, markEntitlement } from '@/lib/entitlement';
-import { extendAppStatus, expiryAfterMonths, PAID_MONTHS, PAID_PRICE } from '@/lib/payment';
+import { extendAppStatus, expiryAfterMonths, normalizePaymentType, PAID_MONTHS, PAID_PRICE } from '@/lib/payment';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'mallNo and token required' }, { status: 400 });
   }
 
-  const paymentType = body.paymentType === 'TRIAL' ? 'TRIAL' : 'PAID';
+  const paymentType = normalizePaymentType(body.paymentType);
   const price = Number(body.price) || PAID_PRICE;
   const requestDateTime = typeof body.requestDateTime === 'string' && body.requestDateTime
     ? body.requestDateTime

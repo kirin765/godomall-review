@@ -29,16 +29,20 @@ function sql(): postgres.Sql<Record<string, unknown>> | null {
 }
 
 async function ensureTables(db: postgres.Sql<Record<string, unknown>>) {
+  // ⚠️ postgres.js는 prepared statement로 보내서 ';'로 이어진 다중 문장이 거부된다
+  // (cannot insert multiple commands into a prepared statement). 문장마다 나눠 보낸다.
   await db`
     create table if not exists app_tokens (
       mall_id text primary key,
       access_token text not null,
-      updated_at timestamptz not null default now());
+      updated_at timestamptz not null default now())`;
+  await db`
     create table if not exists app_entitlement (
       mall_id text primary key,
       app_status text not null default 'UNKNOWN',
       expire_ts timestamptz,
-      checked_at timestamptz not null default now());
+      checked_at timestamptz not null default now())`;
+  await db`
     create table if not exists app_subscriptions (
       id serial primary key,
       mall_id text not null,
@@ -46,9 +50,9 @@ async function ensureTables(db: postgres.Sql<Record<string, unknown>>) {
       payment_type text not null,
       price int not null,
       until_ts timestamptz not null,
-      created_at timestamptz not null default now());
-    create index if not exists idx_sub_mall on app_subscriptions (mall_id, until_ts);
-  `;
+      created_at timestamptz not null default now())`;
+  await db`
+    create index if not exists idx_sub_mall on app_subscriptions (mall_id, until_ts)`;
 }
 
 /** 세션 발급 시 몰 장기토큰 저장 (유료 전환 후 판매사 측 extend 호출에 필요) */
@@ -93,11 +97,11 @@ export async function deleteToken(mallNo: number): Promise<void> {
   }
 }
 
-/** 인앱결제(또는 체험) 기록 — paid 판정 근거 */
+/** 인앱결제(또는 체험) 기록 — paid 판정 근거. paymentType은 workspace 스펙(TRIAL/CHARGE) 기준. */
 export async function recordSubscription(opts: {
   mallNo: number;
   orderNo?: string;
-  paymentType: 'TRIAL' | 'PAID';
+  paymentType: 'TRIAL' | 'CHARGE';
   price: number;
   untilTs: Date;
 }): Promise<boolean> {

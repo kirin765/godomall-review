@@ -66,9 +66,15 @@ export type ExtendParams = {
   orderNo?: string;
   /** 새 만료일시 "yyyy-MM-dd HH:mm:ss" (지정 없으면 now + GODO_PAID_MONTHS) */
   requestDateTime?: string;
-  paymentType: 'TRIAL' | 'PAID';
+  /** workspace 스펙: TRIAL(무료 체험) | CHARGE(인앱 유료결제). 'PAID'는 예전 코드 호환용 별칭. */
+  paymentType: 'TRIAL' | 'CHARGE';
   price: number;
 };
+
+/** workspace `paymentType` 정규화 — 예전 코드에서 쓰던 'PAID'를 스펙의 'CHARGE'로 매핑한다. */
+export function normalizePaymentType(raw: unknown): 'TRIAL' | 'CHARGE' {
+  return String(raw ?? '') === 'TRIAL' ? 'TRIAL' : 'CHARGE';
+}
 
 /** PUT /app-installed/extend — 204 성공. 실패 시 throw(호출자가 기록). */
 export async function extendAppStatus(accessToken: string, params: ExtendParams): Promise<void> {

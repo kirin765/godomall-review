@@ -33,7 +33,13 @@ export async function GET(req: NextRequest) {
     const redirectUri = process.env.GODOMALL_REDIRECT_URI || `${new URL(req.url).origin}/api/auth/launch`;
     const { access_token } = await exchangeLongLived(code, redirectUri);
     const profile = await getMallProfile(access_token);
-    void saveToken(profile.mallNo, access_token); // 실패해도 로그인은 진행(무료 폴백)
+    // 토큰 저장은 redirect보다 먼저 완료시킨다 — serverless에서 void(비동기)로 두면
+    // 응답 직후 인스턴스가 회수되어 DB 기록이 유실된다 (app_tokens가 안 만들어지는 원인).
+    try {
+      await saveToken(profile.mallNo, access_token);
+    } catch {
+      /* 저장 실패해도 로그인은 진행(무료 폴백) — 웹훅 결제 경로만 나중에 문제 */
+    }
 
     const res = NextResponse.redirect(new URL('/admin', req.url));
     res.cookies.set(sessionCookie(profile.mallNo, access_token));

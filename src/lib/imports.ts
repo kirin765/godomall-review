@@ -11,6 +11,11 @@ import { listGoodsReviewArticles, type GoodsReviewArticle } from '@/lib/godomall
  * (상품·작성자·본문·평점)을 대조해 article_sno를 채운다(reconcileImports).
  * 그 sno가 있어야만 DELETE /boards/goodsreview/articles/{sno}로 지울 수 있다.
  * (과거 옮긴 글은 기록이 없어 자동 식별 불가 — 기능은 이 배포 이후 옮긴 글부터 적용된다.)
+ *
+ * ⚠️ 테이블 명을 고유하게(`godo_review_imported`) 쓴다. 이 DATABASE_URL은 다른 프로젝트와
+ *    공유되는 DB라, 제네릭한 `imported_review`라는 이름이 다른 앱의 테이블과 충돌해
+ *    `column "import_key" does not exist` 같은 스키마가 어긋나는 문제가 실제로 발생했다
+ *    (운영 로그 실측, 2026-09-01).
  */
 
 export type ImportedReviewRow = {
@@ -39,13 +44,15 @@ const MATCH_PAGE_SIZE = 1000;
 const MATCH_START_MARGIN_MS = 2 * 60 * 1000; // 등록 직후 목록에 안 잡힐 수 있어 시작 시각을 앞으로 당긴다
 const MATCH_END_MARGIN_MS = 60 * 1000;
 
+const TABLE = 'godo_review_imported';
+
 async function withDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T | null> {
   const url = process.env.DATABASE_URL;
   if (!url) return null;
   const sql = postgres(url, { max: 1 });
   try {
     await sql`
-      create table if not exists imported_review (
+      create table if not exists ${sql(TABLE)} (
         import_key text primary key,
         mall_no bigint not null,
         article_sno bigint,
@@ -70,7 +77,7 @@ export async function recordImports(mallNo: number, rows: NewImport[]): Promise<
     await withDb(async (sql) => {
       for (const r of rows)
         await sql`
-          insert into imported_review (import_key, mall_no, goods_no, writer, score, content, image_url, created_date)
+          insert into ${sql(TABLE)} (import_key, mall_no, goods_no, writer, score, content, image_url, created_date)
           values (${randomUUID()}, ${mallNo}, ${r.goods_no}, ${r.writer}, ${r.score}, ${r.content}, ${r.image_url}, ${r.created_date})`;
     });
   } catch (e) {
@@ -84,11 +91,11 @@ export async function listImports(mallNo: number, productNo?: number): Promise<I
     const rows = productNo
       ? await sql<ImportedReviewRow[]>`
           select import_key, article_sno, goods_no, writer, score, content, image_url, created_date, imported_at
-          from imported_review where mall_no = ${mallNo} and goods_no = ${productNo}
+          from ${sql(TABLE)} where mall_no = ${mallNo} and goods_no = ${productNo}
           order by imported_at desc`
       : await sql<ImportedReviewRow[]>`
           select import_key, article_sno, goods_no, writer, score, content, image_url, created_date, imported_at
-          from imported_review where mall_no = ${mallNo}
+          from ${sql(TABLE)} where mall_no = ${mallNo}
           order by imported_at desc`;
     return rows;
   });
@@ -99,7 +106,7 @@ export async function removeImports(mallNo: number, articleSnos: number[]): Prom
   if (!articleSnos.length) return;
   await withDb(async (sql) => {
     for (const sno of articleSnos)
-      await sql`delete from imported_review where mall_no = ${mallNo} and article_sno = ${sno}`;
+      await sql`delete from ${sql(TABLE)} where mall_no = ${mallNo} and article_sno = ${sno}`;
   });
 }
 
@@ -109,7 +116,7 @@ export async function reconcileImports(token: string, mallNo: number): Promise<v
     type Pending = { import_key: string; goods_no: number; writer: string; score: number; content: string; imported_at: Date };
     const pending = await sql<Pending[]>`
       select import_key, goods_no, writer, score, content, imported_at
-      from imported_review
+      from ${sql(TABLE)}
       where mall_no = ${mallNo} and article_sno is null
       order by imported_at asc`;
     if (!pending.length) return;
@@ -143,7 +150,7 @@ export async function reconcileImports(token: string, mallNo: number): Promise<v
           (a.rating ?? null) === p.score,
       );
       if (ai < 0) continue;
-      await sql`update imported_review set article_sno = ${pool[ai].sno} where import_key = ${p.import_key}`;
+      await sql`update ${sql(TABLE)} set article_sno = ${pool[ai].sno} where import_key = ${p.import_key}`;
       pool.splice(ai, 1);
     }
   });

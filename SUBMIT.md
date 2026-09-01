@@ -129,10 +129,38 @@
 | 요청 래핑 | `requests` 배열. `request` 단수는 422 |
 | API 버전 | `2026-03-01` |
 
+## 유료(인앱결제) 실측 — 통과 (2026-09-01, 승인 직후)
+
+고도몰 심사 승인 후 테스트 몰에서 인앱 유료결제 흐름을 실측으로 검증했다.
+
+| 항목 | 결과 |
+|---|---|
+| 승인 후 앱 설치 상태 | `EXPIRED`(결제대기, 만료 21:43:55) — `GET /app-installed/status`로 확인 |
+| `PUT /app-installed/extend` 호출 | **성공(204 요건).** `paymentType=CHARGE`, `price=9900` |
+| 연장 후 상태 | `EXPIRED` → **`ACTIVE`**, 만료 `2026-10-01`로 설정 |
+| 구독 기록(`app_subscriptions`) | ✅ 기록 → `checkQuota`/`getEntitlement`가 paid(무제한)로 판정 |
+| 관리 화면 배너 | 「리뷰이사 플러스 — 무제한 이용 중」 표시 확인 |
+
+**함께 고친 버그 3건 (이 실측으로 잡음)**
+
+1. **`paymentType` 값을 틀리게 보냄** — 코드가 `PAID`를 보냈지만 워크스페이스 스펙은 `TRIAL|CHARGE`.
+   `CHARGE`가 인앱 유료결제다. `normalizePaymentType()`로 스펙값으로 맵핑(이전 `PAID` 호환).
+2. **`app_tokens`/`app_entitlement`/`app_subscriptions` 테이블이 안 만들어지던 버그** —
+   postgres.js가 prepared statement로 보내서 `;`로 이어진 **다중 CREATE 문장을 거부**해
+   (`cannot insert multiple commands into a prepared statement`) 조용히 실패. 문장별로 분리해 수정.
+   이 때문에 결제 웹훅이 필요로 하는 몰 토큰이 DB에 저장되지 않았다.
+3. **launch의 토큰 저장은 `void saveToken()`(비동기 무시)로 방치** — serverless에서 응답 직후
+   인스턴스가 회수되어 DB 기록이 유실됨. `await`로 대기하도록 수정.
+4. **옮긴 리뷰 원장 테이블 이름 충돌** — 공유 DB에서 제네릭한 `imported_review`가 다른 프로젝트의
+   동명 테이블과 충돌해 `column "import_key" does not exist` 발생. 고유 이름 `godo_review_imported`로 변경.
+
+**검증 후 정리**: 테스트로 만든 `diag-*` 구독 기록·entitlement 캐시를 삭제해 무료(20건) 기준으로
+복구했다. 임시 진단 라우트(`/api/diag/*`)는 제거했다. 워크스페이스 `ACTIVE`(2026-10-01)는
+심사자가 앱을 실행할 수 있도록 유지했고, 앱의 paid 판정은 구독 기록이 없으므로 무료로 판정한다.
+
 ## 미확인
 
 | # | 항목 |
 |---|---|
-| 1 | **카페24 심사 소요 기간** — 문의 등록됨, 답변 대기 |
-| 2 | 구매평 엑셀의 실제 컬럼 구성 — 첫 고객 파일로 확정 |
-| 3 | 반려 시 재심사 기간 |
+| 1 | 샵바이 솔루션 검증 — 고도몰만 포팅/실측함 |
+| 2 | 실제 결제 콜백 payload 매핑 — 워크스페이스가 결제 완료를 판매사로 보내는 콜백 형식. 현재는 extend(관리자/헤더) 경로로 동일 처리 가능 |

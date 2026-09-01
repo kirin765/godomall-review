@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getToken, recordSubscription, markEntitlement } from '@/lib/entitlement';
-import { extendAppStatus, expiryAfterMonths, PAID_MONTHS, PAID_PRICE } from '@/lib/payment';
+import { extendAppStatus, expiryAfterMonths, normalizePaymentType, PAID_MONTHS, PAID_PRICE } from '@/lib/payment';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'no token for mall; run the app once first' }, { status: 409 });
   }
 
-  const paymentType = body.paymentType === 'TRIAL' ? 'TRIAL' : 'PAID';
+  const paymentType = normalizePaymentType(body.paymentType);
   const price = Number(body.price) || PAID_PRICE;
   const requestDateTime = typeof body.requestDateTime === 'string' && body.requestDateTime
     ? body.requestDateTime
