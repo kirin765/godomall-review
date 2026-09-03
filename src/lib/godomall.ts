@@ -17,6 +17,20 @@ export type MallProfile = {
   adminName: string;
 };
 
+/**
+ * 고도몰 server API 호출 제한 (공식 스펙: server-docs.godomall.com/spec/server-api.yml).
+ * 이 앱이 쓰는 엔드포인트의 한도만 정리한다:
+ *
+ *  - POST /boards/external/goodsreviews/articles/bulk : 리뷰 최대 100개/호출
+ *      필드 제한: subject(제목) 100자, writerName 50자, attachmentUrls(첨부) 10개, reviewRating 0~5
+ *      응답은 { success, fail, failMessage } 뿐이라 "어느 행이 성공"인지는 알 수 없다.
+ *  - GET  /boards/goodsreview/articles : pageSize 기본 100, 최대 10000
+ *  - GET  /goods                         : pageSize 기본 100, 최대 1000
+ *  - DELETE /boards/{boardId}/articles/{articleSno} : 1건/호출 (bulk 삭제 엔드포인트 없음)
+ *
+ * 속도 제한(429)은 스펙에 명시되어 있지 않다. 실질 제약은 서버리스 함수 시간 상한(60초)이다.
+ */
+
 type TokenResponse = {
   token_type: string;
   access_token: string;

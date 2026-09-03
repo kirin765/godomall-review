@@ -39,8 +39,12 @@ export type NewImport = {
   created_date: string | null;
 };
 
-const MATCH_PAGES_MAX = 10; // 시간 창 안 게시글이 많아도 1만 건까지만 대조한다
-const MATCH_PAGE_SIZE = 1000;
+// 고도몰 server API 스펙(server-docs.godomall.com/spec/server-api.yml) 기준:
+// GET /boards/goodsreview/articles 는 pageSize 기본 100, 최대 10000. 상품 후기 게시판은
+// 하루에 리뷰가 수백 건이어도 대량 이관 직후엔 시간 창 안에 수천~만 건이 몰릴 수 있어
+// 최대값(10000)으로 페이지를 줄여 조회 왕복을 최소화한다.
+const MATCH_PAGES_MAX = 10; // 안전망: 시간 창 안 게시글이 아무리 많아도 10만 건까지만 대조한다
+const MATCH_PAGE_SIZE = 10000;
 const MATCH_START_MARGIN_MS = 2 * 60 * 1000; // 등록 직후 목록에 안 잡힐 수 있어 시작 시각을 앞으로 당긴다
 const MATCH_END_MARGIN_MS = 60 * 1000;
 
@@ -74,30 +78,58 @@ async function withDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T | nul
 export async function recordImports(mallNo: number, rows: NewImport[]): Promise<void> {
   if (!rows.length) return;
   try {
+    // 한 줄이라도 undefined/NaN이 있으면 postgres가 통째로 거부한다(UNDEFINED_VALUE).
+    // 값은 전부 안전한 원시형으로 다듬고, 상품번호가 이상한 줄은 버린다.
+    const safe = rows
+      .map(
+        (r) =>
+          [
+            randomUUID(),
+            String(mallNo),
+            Number(r.goods_no),
+            String(r.writer ?? '익명').slice(0, 200),
+            Math.min(5, Math.max(1, Math.round(Number(r.score) || 5))),
+            String(r.content ?? '').slice(0, 10000),
+            r.image_url == null ? null : String(r.image_url).slice(0, 2000),
+            r.created_date == null ? null : String(r.created_date).slice(0, 40),
+          ] as [string, string, number, string, number, string, string | null, string | null],
+      )
+      .filter((r) => Number.isFinite(r[2]) && r[2] > 0);
+    if (!safe.length) return;
     await withDb(async (sql) => {
-      for (const r of rows)
-        await sql`
-          insert into ${sql(TABLE)} (import_key, mall_no, goods_no, writer, score, content, image_url, created_date)
-          values (${randomUUID()}, ${mallNo}, ${r.goods_no}, ${r.writer}, ${r.score}, ${r.content}, ${r.image_url}, ${r.created_date})`;
+      // ⚠️ postgres 3.4.9의 sql(객체배열, ...컬럼) 헬퍼는 값이 전부 정의돼 있어도
+      // UNDEFINED_VALUE를 뱉는다(2026-09 실측·로컬 재현). 배열-of-배열로 직접 넣는다.
+      await sql`
+        insert into ${sql(TABLE)} (import_key, mall_no, goods_no, writer, score, content, image_url, created_date)
+        values ${sql(safe as readonly (string | number)[][])}
+        on conflict (import_key) do nothing`;
     });
   } catch (e) {
     console.error('[imports] record failed', (e as Error).message);
   }
 }
 
-/** 이 몰이 옮긴 리뷰 목록. 상품 필터가 있으면 그 상품만. 최신순. */
-export async function listImports(mallNo: number, productNo?: number): Promise<ImportedReviewRow[] | null> {
+/** 이 몰이 옮긴 리뷰 목록. 상품 필터가 있으면 그 상품만. 최신순, 페이지네이션. */
+export async function listImports(
+  mallNo: number,
+  opts: { productNo?: number; page?: number; pageSize?: number } = {},
+): Promise<{ rows: ImportedReviewRow[]; total: number } | null> {
+  const productNo = opts.productNo;
+  const pageSize = Math.min(200, Math.max(1, opts.pageSize ?? 50));
+  const offset = Math.max(0, (opts.page ?? 1) - 1) * pageSize;
   return withDb(async (sql) => {
-    const rows = productNo
-      ? await sql<ImportedReviewRow[]>`
-          select import_key, article_sno, goods_no, writer, score, content, image_url, created_date, imported_at
-          from ${sql(TABLE)} where mall_no = ${mallNo} and goods_no = ${productNo}
-          order by imported_at desc`
-      : await sql<ImportedReviewRow[]>`
-          select import_key, article_sno, goods_no, writer, score, content, image_url, created_date, imported_at
-          from ${sql(TABLE)} where mall_no = ${mallNo}
-          order by imported_at desc`;
-    return rows;
+    const where = productNo
+      ? sql`where mall_no = ${mallNo} and goods_no = ${productNo}`
+      : sql`where mall_no = ${mallNo}`;
+    const [rows, total] = await Promise.all([
+      sql<ImportedReviewRow[]>`
+        select import_key, article_sno, goods_no, writer, score, content, image_url, created_date, imported_at
+        from ${sql(TABLE)} ${where}
+        order by imported_at desc
+        limit ${pageSize} offset ${offset}`,
+      sql<{ n: string }[]>`select count(*) as n from ${sql(TABLE)} ${where}`,
+    ]);
+    return { rows, total: Number(total[0]?.n ?? 0) };
   });
 }
 
@@ -105,8 +137,19 @@ export async function listImports(mallNo: number, productNo?: number): Promise<I
 export async function removeImports(mallNo: number, articleSnos: number[]): Promise<void> {
   if (!articleSnos.length) return;
   await withDb(async (sql) => {
-    for (const sno of articleSnos)
-      await sql`delete from ${sql(TABLE)} where mall_no = ${mallNo} and article_sno = ${sno}`;
+    await sql`delete from ${sql(TABLE)} where mall_no = ${mallNo} and article_sno in ${sql(articleSnos)}`;
+  });
+}
+
+/** 필터에 해당하는 확인된 글 번호를 최대 limit개 꺼낸다. 전체 삭제 진행용(서버 순회). */
+export async function listArticleNos(mallNo: number, productNo?: number, limit = 50): Promise<number[] | null> {
+  return withDb(async (sql) => {
+    const where = productNo
+      ? sql`where mall_no = ${mallNo} and goods_no = ${productNo} and article_sno is not null`
+      : sql`where mall_no = ${mallNo} and article_sno is not null`;
+    const rows = await sql<{ article_sno: number }[]>`
+      select article_sno from ${sql(TABLE)} ${where} order by article_sno limit ${limit}`;
+    return rows.map((r) => r.article_sno).filter((n) => n != null);
   });
 }
 
