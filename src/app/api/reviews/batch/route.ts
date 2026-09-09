@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { sessionMall } from '@/lib/launch';
 import { checkQuota, addUsage, FREE_LIMIT } from '@/lib/quota';
 import { getEntitlement } from '@/lib/entitlement';
-import { writeReviews } from '@/lib/writeReviews';
+import { writeReviews, toNewImport } from '@/lib/writeReviews';
 import { maskWriter, type ImportedReview } from '@/lib/reviewImport';
+import { splitByExisting, reviewHash, reconcileImports } from '@/lib/imports';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -20,7 +21,13 @@ export const MAX_BATCH = 200;
  *
  * 한 요청에 모든 리뷰를 넣지 않는 이유: 1만 건이면 서버리스 함수 시간 제한(60초)을 무조건 넘어
  * 중간에 죽고, 죽으면 원장 기록도 안 돼 목록·삭제가 모두 무력화된다 (2026-09 고객 문의).
- * 배치마다 성공분이 즉시 원장에 남으므로, 실패해도 여기까지 온 글은 목록에서 보인다.
+ * 배치마다 성공분이 즉시 원장에 남으므로(writeReviews 내부), 실패해도 여기까지 온 글은 목록에서
+ * 보인다.
+ *
+ * 멱등성(부분): 내용 해시(dedup_hash)로 "이미 게시판에 확인된(article_sno 확정) 리뷰"는
+ * 재전송에서 건너뛰고 already로 돌려준다. 요청이 죽은 뒤 재시도가 오면 같은 해시가
+ * 미확정으로 남아 있어 우선 고도몰 게시판과 대조해(needsReconcile) 올라간 글을 확정시킨다.
+ * 그렇게 해도 미확정인 행은 다시 보낸다(고도몰 bulk가 행별 성공을 안 줘서, 확인된 것만 멱등).
  */
 export async function POST(req: NextRequest) {
   const session = await sessionMall();
@@ -50,19 +57,44 @@ export async function POST(req: NextRequest) {
     imageUrl: r.imageUrl ? String(r.imageUrl).slice(0, 2000) : null,
   }));
 
+  // 이미 게시판에 확인된 리뷰를 내용 해시로 걸러낸다 (부분 멱등 — article_sno 확정분만).
+  // DB가 없으면 null → 중복 제거 없이 진행.
+  const hashes = reviews.map((r) => reviewHash(productNo, toNewImport(productNo, r)));
+  let dedup = await splitByExisting(session.mallNo, productNo, hashes);
+  if (dedup?.needsReconcile) {
+    // 요청 중단 후 재시도로 같은 해시가 미확정으로 남아 있다 → 게시판과 대조해 실제로
+    // 올라간 글을 확정시킨 뒤 다시 판정한다. 조회 실패는 최선 노력으로 무시한다.
+    await reconcileImports(session.accessToken, session.mallNo).catch((e) =>
+      console.error('[reviews/batch] reconcile failed', (e as Error).message),
+    );
+    dedup = await splitByExisting(session.mallNo, productNo, hashes);
+  }
+  const pending = dedup
+    ? reviews.filter((_, i) => !dedup!.confirmedHashes.has(hashes[i]))
+    : reviews;
+  const already = reviews.length - pending.length;
+
   const ent = await getEntitlement(session.mallNo, session.accessToken);
-  const quota = await checkQuota(session.mallNo, reviews.length, ent.paid);
-  if (!quota.configured) {
+  const quota = ent.paid
+    ? { allowed: pending.length, configured: true, used: 0 }
+    : await checkQuota(session.mallNo, pending.length, false);
+  if (pending.length && !quota.configured) {
     return NextResponse.json({ error: 'review quota is not configured' }, { status: 503 });
   }
-  if (quota.allowed <= 0) {
+  if (pending.length && quota.allowed <= 0) {
     return NextResponse.json(
-      { error: `무료로 ${FREE_LIMIT}건까지 옮길 수 있어요. 계속 쓰시려면 유료로 전환해 주세요.`, used: quota.used },
+      {
+        error: `무료로 ${FREE_LIMIT}건까지 옮길 수 있어요. 계속 쓰시려면 유료로 전환해 주세요.`,
+        used: quota.used,
+        already,
+      },
       { status: 402 },
     );
   }
 
-  const toWrite = reviews.slice(0, quota.allowed);
+  // 무료면 잔여 한도만큼만 쓴다(쓰기 후 실제 성공분만 addUsage로 집계 — 클라이언트가
+  // 단일 배치씩 순차로 보내므로 카페24판의 원자적 예약은 불필요).
+  const toWrite = pending.slice(0, quota.allowed);
   const { written, failed, failMessage } = await writeReviews(
     session.accessToken,
     session.mallNo,
@@ -74,10 +106,11 @@ export async function POST(req: NextRequest) {
 
   // 무료 한도로 보낸 슬라이스 일부가 아예 시도되지 않은 경우에만 "한도 소진"이다.
   // (일부 실패는 failed로 반환될 뿐 한도와 무관하다.)
-  const quotaExhausted = !ent.paid && toWrite.length < reviews.length;
+  const quotaExhausted = !ent.paid && toWrite.length < pending.length;
   return NextResponse.json({
     written,
     failed,
+    already,
     quotaExhausted,
     paid: ent.paid,
     freeRemaining: ent.paid ? null : Math.max(0, quota.allowed - written),

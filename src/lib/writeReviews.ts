@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 import { importReviews, type ExternalReview } from '@/lib/godomall';
 import { toDateTime, type ImportedReview } from '@/lib/reviewImport';
-import { recordImports, type NewImport } from '@/lib/imports';
+import { recordImports, reviewHash, type NewImport } from '@/lib/imports';
 
 // 고도몰 server API 스펙 기준 외부 리뷰 bulk 등록은 한 호출에 최대 100개.
 // (카페24는 한 호출 10건 — 고도몰은 10배 크다. 배치 크기는 이 상수로만 결정한다.)
@@ -32,8 +32,13 @@ function toPayload(source: string, productNo: number, r: ImportedReview): Extern
   };
 }
 
-/** 벌크 등록에 보낸 값과 똑같이 원장에 남긴다 — 나중에 게시판 목록과 대조해 글 번호를 찾으려면 정확히 일치해야 한다. */
-function toNewImport(productNo: number, r: ImportedReview): NewImport {
+/**
+ * 벌크 등록에 보낸 값과 똑같이 원장에 남긴다 — 나중에 게시판 목록과 대조해 글 번호를 찾으려면
+ * 정확히 일치해야 한다. 멱등 해시(reviewHash)도 이 정제 결과로 만들어야 재전송 간 값이
+ * 어긋나지 않는다(중복 판정이 깨지는 것을 막는다). 배치 라우터가 사전 중복 필터를 돌릴 수
+ * 있게 공개한다.
+ */
+export function toNewImport(productNo: number, r: ImportedReview): NewImport {
   return {
     goods_no: productNo,
     // toPayload와 같은 정제를 그대로 적용한다 (대조는 writerName 정확 일치 기준이라 어긋나면 안 된다).
@@ -53,12 +58,15 @@ export type WriteOutcome = {
 
 /**
  * 리뷰 목록을 고도몰 외부 리뷰 bulk API로 쓴다. 한 호출 100건 제한이라 100건씩 나눠 호출하고,
- * 배치마다 원장(imported_review)에 즉시 기록한다. 이 요청이 중간에 죽어도(서버리스 시간 초과 등)
- * 이미 성공한 글은 목록·삭제에서 복구된다 — 대량 이관의 핵심.
+ * **배치마다** 원장(imported_review)에 즉시 기록한다. 이 요청이 중간에 죽어도(서버리스 시간 초과 등)
+ * 이미 성공한 배치는 목록·삭제에서 복구된다 — 대량 이관의 핵심.
+ * (카페24판 2464d56처럼, 기록을 마지막에 몰아 하면 요청이 죽을 때 그 배치 전체가 원장에서
+ *  사라져 목록·삭제가 무력화된다. 배치 단위 즉시 기록이 이를 막는다.)
  *
  * 고도몰 bulk 응답({success, fail})은 글 번호를 주지 않아 "어느 행이 성공"인지는 알 수 없다.
  * 성공이 1건이라도 있으면 제출한 행 전체를 원장에 남기고, 실제 게시글과 대조된 행만
- * article_sno가 채워진다(reconcileImports — 목록 조회 때 수행).
+ * article_sno가 채워진다(reconcileImports — 목록 조회 때 수행). dedup_hash는 재전송 시
+ * "이미 확인된 글은 건너뛰기"의 근거가 된다.
  *
  * 배치 실패는 그 배치 전체를 failed로 돌리고 다음 배치를 계속 진행한다.
  */
@@ -72,26 +80,32 @@ export async function writeReviews(
   let written = 0;
   let failed = 0;
   const failMessage: string[] = [];
-  const recorded: NewImport[] = [];
 
   for (let i = 0; i < reviews.length; i += BULK_MAX) {
     const chunk = reviews.slice(i, i + BULK_MAX);
+    // 보낼 값과 원장·해시를 같은 정제로 미리 만들어 둔다 (멱등 판정이 어긋나지 않게).
+    const ledgerRows = chunk.map((r) => {
+      const ni = toNewImport(productNo, r);
+      return { ...ni, dedup_hash: reviewHash(productNo, ni) };
+    });
     const payload = chunk.map((r) => toPayload(source, productNo, r));
     try {
       const res = await importReviews(token, payload);
       written += res.success;
       failed += res.fail;
       failMessage.push(...(res.failMessage ?? []));
-      if (res.success > 0) recorded.push(...chunk.map((r) => toNewImport(productNo, r)));
+      if (res.success > 0) {
+        // 성공이 있는 배치는 즉시 원장에 남긴다 — 기록 실패는 쓰기 흐름을 막지 않는다.
+        // 글 자체는 이미 고도몰에 등록됐으므로, 기록은 목록·삭제를 위한 최선 노력이다.
+        await recordImports(mallNo, ledgerRows).catch((e) =>
+          console.error('[writeReviews] ledger failed', (e as Error).message),
+        );
+      }
     } catch (e) {
       failed += chunk.length;
       failMessage.push((e as Error).message.slice(0, 120));
     }
   }
-
-  // 옮긴 글을 원장에 남긴다 → 관리 화면에서 "리뷰이사가 옮긴 리뷰"로 걸러 삭제할 수 있다.
-  // 원장 기록이 실패해도 글 자체는 이미 고도몰에 등록됐으므로 쓰기 흐름을 막지 않는다.
-  await recordImports(mallNo, recorded);
 
   return { written, failed, failMessage };
 }

@@ -149,11 +149,31 @@ export async function listGoodsReviewArticles(
   return res.json();
 }
 
-/** 게시글 삭제(204). 상품 후기는 boardId='goodsreview'. 실측으로 204/404 동작을 확인할 것. */
-export async function deleteBoardArticle(token: string, boardId: string, articleSno: number): Promise<void> {
+/**
+ * 게시글 삭제(204). 상품 후기는 boardId='goodsreview'.
+ * 삭제는 멱등이라 404(이미 지워짐)도 성공으로 처리할 수 있게, status를 에러에 붙여 던진다
+ * (재실행 시 failed가 쌓이지 않게 — cafe24-review 2464d56 교훈).
+ *
+ * ⚠️ 404=이미 지워짐은 카페24판에서 실측됐지만 고도몰에서는 미실측이다. 404가 다른 사유
+ * (권한·게시판 없음)를 가리킨다면 원장 행만 지워지고 게시판 글이 남아 관리 화면에서
+ * 사라진다 — 운영 배포 전 DELETE 404 응답을 실측할 것.
+ */
+export async function deleteBoardArticle(
+  token: string,
+  boardId: string,
+  articleSno: number,
+  opts: { signal?: AbortSignal } = {},
+): Promise<void> {
   const res = await fetch(`${API_BASE}/boards/${boardId}/articles/${articleSno}`, {
     method: 'DELETE',
     headers: authHeaders(token),
+    signal: opts.signal,
   });
-  if (!res.ok) throw new Error(`delete article ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    const err = new Error(`delete article ${res.status}: ${await res.text()}`) as Error & {
+      status?: number;
+    };
+    err.status = res.status;
+    throw err;
+  }
 }

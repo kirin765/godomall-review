@@ -15,6 +15,10 @@ const GOODSREVIEW_BOARD = 'goodsreview';
 // 넣으면 서버리스 시간 제한(60초)을 넘겨 중간에 죽는다 (2026-09 고객 문의).
 // 이 값을 넘는 글은 클라이언트가 나눠 보내거나(all=false) 서버가 hasMore로 계속한다(all=true).
 const MAX_DELETE = 50;
+// 삭제는 1건/호출이라 순차면 느리다. 서버리스 60초 상한 안에서 마지막 삭제 페이지가
+// 끝나도록 이 정도로만 병렬로 돌린다. 삭제는 멱등이라(404=이미 지워짐=성공) 재실행이 안전하다.
+const DELETE_CONCURRENCY = 6;
+const DELETE_TIMEOUT_MS = 30000;
 
 /**
  * 리뷰이사가 옮긴 리뷰 관리. 목록·삭제 모두 원장(godo_review_imported)만 기준으로 동작한다.
@@ -82,14 +86,32 @@ export async function DELETE(req: NextRequest) {
 
   const deleted: number[] = [];
   const failed: { article_sno: number; error: string }[] = [];
-  for (const sno of snos) {
-    try {
-      await deleteBoardArticle(session.accessToken, GOODSREVIEW_BOARD, sno);
-      deleted.push(sno);
-    } catch (e) {
-      failed.push({ article_sno: sno, error: (e as Error).message.slice(0, 200) });
+  // 1건씩 순차로 지우면 수천 건이면 수십 분이 걸린다. DELETE_CONCURRENCY만큼 병렬로 돌린다.
+  // 삭제는 멱등: 404(이미 없음)도 성공으로 보고 원장에서 정리해, 중단 후 재실행이 쌓이지 않게 한다.
+  let cursor = 0;
+  const worker = async () => {
+    while (true) {
+      const sno = snos[cursor++];
+      if (sno === undefined) return;
+      try {
+        await deleteBoardArticle(session.accessToken, GOODSREVIEW_BOARD, sno, {
+          signal: AbortSignal.timeout(DELETE_TIMEOUT_MS),
+        });
+        deleted.push(sno);
+      } catch (e) {
+        const status = (e as { status?: number }).status;
+        // 이미 지워진 글(404)은 목표가 이뤄진 것이므로 성공 처리한다. 재실행 실패가 안 쌓인다.
+        if (status === 404) {
+          deleted.push(sno);
+          continue;
+        }
+        // 타임아웃·연결 오류는 재시도하지 않는다 (삭제는 멱등이라 재시도해도 안전하지만,
+        // 이번 턴을 넘기면 hasMore로 다음 순회 때 다시 시도한다).
+        failed.push({ article_sno: sno, error: (e as Error).message.slice(0, 200) });
+      }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(DELETE_CONCURRENCY, snos.length) }, worker));
   try {
     await removeImports(session.mallNo, deleted);
   } catch (e) {
