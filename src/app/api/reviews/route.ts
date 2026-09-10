@@ -62,7 +62,7 @@ export async function POST(req: NextRequest) {
   }
 
   const toWrite = reviews.slice(0, quota.allowed);
-  const { written, failMessage } = await writeReviews(
+  const { written, permanentFailed, failMessage } = await writeReviews(
     session.accessToken,
     session.mallNo,
     productNo,
@@ -81,6 +81,8 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     parsed: reviews.length,
     written,
+    // 재시도로 풀리지 않는 오류로 끝난 건수 — 클라이언트 안내용.
+    permanentFailed,
     skipped: reviews.length - written,
     paid: ent.paid,
     plan: { mode: ent.mode, status: ent.status, price: PAID_PRICE, storeUrl: appStoreUrl(), payment: PAYMENT_INFO },

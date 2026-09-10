@@ -24,6 +24,9 @@
 .DS_Store
 *.pem
 
+# customer correspondence drafts (contain personal contact info)
+/REPLY-*.md
+
 # debug
 npm-debug.log*
 yarn-debug.log*

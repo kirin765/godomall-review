@@ -6,6 +6,10 @@ import { recordImports, reviewHash, type NewImport } from '@/lib/imports';
 // 고도몰 server API 스펙 기준 외부 리뷰 bulk 등록은 한 호출에 최대 100개.
 // (카페24는 한 호출 10건 — 고도몰은 10배 크다. 배치 크기는 이 상수로만 결정한다.)
 const BULK_MAX = 100;
+// 함수 시간 예산. Vercel 함수 제한(60초)을 넘겨 죽으면 클라이언트가 응답을 못 받고
+// 원장 기록도 건너뛴다. 예산이 다하면 남은 청크를 실패로 돌려 반드시 응답한다 —
+// 클라이언트가 해시 멱등으로 이어서 재시도하므로 안전하다 (cafe24-review b75caf8).
+const BUDGET_MS = 45000;
 
 const SOURCES: Record<string, { name: string; url: string; naver: 'Y' | 'N' }> = {
   coupang: { name: '쿠팡', url: 'https://www.coupang.com', naver: 'N' },
@@ -53,6 +57,12 @@ export function toNewImport(productNo: number, r: ImportedReview): NewImport {
 export type WriteOutcome = {
   written: number;
   failed: number;
+  /**
+   * 재시도로 풀리지 않는 오류(400·422, 고도몰이 행 단위로 돌려준 검증 거부)로 끝난 건수.
+   * 클라이언트는 실패가 전부 영구적일 때만 그 배치의 자동 재시도를 멈춘다 —
+   * 일부면 다시 보내 나머지(일시 오류)를 건진다.
+   */
+  permanentFailed: number;
   failMessage: string[];
 };
 
@@ -79,10 +89,19 @@ export async function writeReviews(
 ): Promise<WriteOutcome> {
   let written = 0;
   let failed = 0;
+  let permanentFailed = 0;
   const failMessage: string[] = [];
+  const deadline = Date.now() + BUDGET_MS;
 
   for (let i = 0; i < reviews.length; i += BULK_MAX) {
     const chunk = reviews.slice(i, i + BULK_MAX);
+    // 예산이 다 찼으면 남은 청크는 시작도 하지 않고 실패로 돌려준다 — 함수가 죽어
+    // 응답을 못 하는 것보다, 실패로 정직하게 돌려 클라이언트가 이어서 재시도하게 한다.
+    if (Date.now() > deadline) {
+      failed += chunk.length;
+      failMessage.push('함수 시간 예산 초과 — 다시 시도해 주세요.');
+      continue;
+    }
     // 보낼 값과 원장·해시를 같은 정제로 미리 만들어 둔다 (멱등 판정이 어긋나지 않게).
     const ledgerRows = chunk.map((r) => {
       const ni = toNewImport(productNo, r);
@@ -93,6 +112,8 @@ export async function writeReviews(
       const res = await importReviews(token, payload);
       written += res.success;
       failed += res.fail;
+      // 고도몰이 행 단위로 돌려준 거부는 데이터 검증 실패라 재시도로 풀리지 않는다.
+      permanentFailed += res.fail;
       failMessage.push(...(res.failMessage ?? []));
       if (res.success > 0) {
         // 성공이 있는 배치는 즉시 원장에 남긴다 — 기록 실패는 쓰기 흐름을 막지 않는다.
@@ -103,9 +124,14 @@ export async function writeReviews(
       }
     } catch (e) {
       failed += chunk.length;
-      failMessage.push((e as Error).message.slice(0, 120));
+      const msg = (e as Error).message;
+      // importReviews가 던지는 "bulk {status}: ..." 메시지에서 상태코드를 읽는다.
+      // 요청 자체가 거부된 400·422는 다시 보내도 실패한다 — 영구 실패로 표시한다.
+      const status = (e as { status?: number }).status ?? Number(/bulk (\d{3})/.exec(msg)?.[1]);
+      if (status === 400 || status === 422) permanentFailed += chunk.length;
+      failMessage.push(msg.slice(0, 120));
     }
   }
 
-  return { written, failed, failMessage };
+  return { written, failed, permanentFailed, failMessage };
 }

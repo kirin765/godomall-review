@@ -84,42 +84,63 @@ const MATCH_END_MARGIN_MS = 60 * 1000;
 
 const TABLE = 'godo_review_imported';
 
-async function withDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T | null> {
+// 서버리스 인스턴스마다 풀을 하나만 맺고 재사용한다. 요청마다 연결을 맺고 끊고 DDL을
+// 다시 돌리면 요청당 수백 ms씩 낭비돼 대량 이관이 그만큼 느려진다 (cafe24-review b75caf8).
+let shared: postgres.Sql | null = null;
+let schemaReady = false;
+
+function db(): postgres.Sql | null {
   const url = process.env.DATABASE_URL;
   if (!url) return null;
-  const sql = postgres(url, { max: 1 });
+  if (!shared) shared = postgres(url, { max: 1, idle_timeout: 20, max_lifetime: 1800 });
+  return shared;
+}
+
+async function withDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T | null> {
+  const sql = db();
+  if (!sql) return null;
   try {
-    await sql`
-      create table if not exists ${sql(TABLE)} (
-        import_key text primary key,
-        mall_no bigint not null,
-        article_sno bigint,
-        goods_no bigint not null,
-        writer text not null,
-        score int not null,
-        content text not null,
-        image_url text,
-        created_date text,
-        dedup_hash text,
-        imported_at timestamptz not null default now()
-      )`;
-    // 기존 배포 표에 해시 컬럼을 안전하게 얹는다. 구형 행은 dedup_hash가 NULL이라
-    // 부분 인덱스에서 제외돼 과거 기록과 부딪히지 않는다.
-    await sql`alter table ${sql(TABLE)} add column if not exists dedup_hash text`;
-    // 재전송 필터(splitByExisting)는 확인(article_sno) 여부와 무관하게 해시를 본다 —
-    // 미확인 행까지 봐야 needsReconcile 판단이 되기 때문. 초기 배포에서 만든 부분 인덱스
-    // (article_sno 조건 포함)는 이 쿼리를 못 타므로 조건이 넓은 인덱스로 교체한다.
-    const hashIdx = await sql<{ ok: number }[]>`
-      select 1 as ok from pg_class where relname = 'godo_review_imported_hash_idx'`;
-    if (!hashIdx.length) {
-      await sql`drop index if exists godo_review_imported_mall_hash_idx`;
-      await sql`create index godo_review_imported_hash_idx
-        on ${sql(TABLE)} (mall_no, goods_no, dedup_hash)
-        where dedup_hash is not null`;
+    if (!schemaReady) {
+      await sql`
+        create table if not exists ${sql(TABLE)} (
+          import_key text primary key,
+          mall_no bigint not null,
+          article_sno bigint,
+          goods_no bigint not null,
+          writer text not null,
+          score int not null,
+          content text not null,
+          image_url text,
+          created_date text,
+          dedup_hash text,
+          imported_at timestamptz not null default now()
+        )`;
+      // 기존 배포 표에 해시 컬럼을 안전하게 얹는다. 구형 행은 dedup_hash가 NULL이라
+      // 부분 인덱스에서 제외돼 과거 기록과 부딪히지 않는다.
+      await sql`alter table ${sql(TABLE)} add column if not exists dedup_hash text`;
+      // 재전송 필터(splitByExisting)는 확인(article_sno) 여부와 무관하게 해시를 본다 —
+      // 미확인 행까지 봐야 needsReconcile 판단이 되기 때문. 초기 배포에서 만든 부분 인덱스
+      // (article_sno 조건 포함)는 이 쿼리를 못 타므로 조건이 넓은 인덱스로 교체한다.
+      const hashIdx = await sql<{ ok: number }[]>`
+        select 1 as ok from pg_class where relname = 'godo_review_imported_hash_idx'`;
+      if (!hashIdx.length) {
+        await sql`drop index if exists godo_review_imported_mall_hash_idx`;
+        await sql`create index godo_review_imported_hash_idx
+          on ${sql(TABLE)} (mall_no, goods_no, dedup_hash)
+          where dedup_hash is not null`;
+      }
+      schemaReady = true;
     }
     return await fn(sql);
-  } finally {
-    await sql.end();
+  } catch (e) {
+    // 연결 계열 오류일 때만 풀을 버려 다음 호출이 새로 맺게 한다. 순수 SQL 오류까지
+    // 버리면 다음 호출마다 연결·DDL을 다시 하게 된다. 스키마는 DB에 있으니 한 번
+    // 확인됐으면 풀이 바뀌어도 다시 확인할 필요가 없다.
+    const msg = ((e as Error).message ?? '').toLowerCase();
+    if (shared === sql && /connect|socket|etimedout|econn|terminat|closed|reset|timeout/.test(msg)) {
+      shared = null;
+    }
+    throw e;
   }
 }
 

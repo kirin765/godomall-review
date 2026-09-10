@@ -95,7 +95,7 @@ export async function POST(req: NextRequest) {
   // 무료면 잔여 한도만큼만 쓴다(쓰기 후 실제 성공분만 addUsage로 집계 — 클라이언트가
   // 단일 배치씩 순차로 보내므로 카페24판의 원자적 예약은 불필요).
   const toWrite = pending.slice(0, quota.allowed);
-  const { written, failed, failMessage } = await writeReviews(
+  const { written, failed, permanentFailed, failMessage } = await writeReviews(
     session.accessToken,
     session.mallNo,
     productNo,
@@ -110,6 +110,9 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     written,
     failed,
+    // 재시도로 풀리지 않는 오류(400·422·행 단위 거부)로 끝난 건수 — 클라이언트는 실패가
+    // 전부 영구적일 때만 그 배치의 자동 재시도를 멈춘다.
+    permanentFailed,
     already,
     quotaExhausted,
     paid: ent.paid,

@@ -45,6 +45,8 @@ type Result = {
   parsed?: number;
   written?: number;
   failed?: number;
+  /** 재시도로 풀리지 않는 오류로 끝난 건수 — 고객 안내용 */
+  permanentFailed?: number;
   /** 이미 옮겨진(게시판 확인된) 리뷰로 재전송에서 건너뛴 건수 */
   already?: number;
   skipped?: number;
@@ -52,6 +54,25 @@ type Result = {
   quotaExceeded?: boolean;
   used?: number;
   error?: string;
+};
+
+/**
+ * 마지막 이관 요약 — 원장은 성공분만 담으므로 "아직 등록되지 않은 리뷰"가 몇 건인지는
+ * 파일(파싱 결과)과 대조해야만 알 수 있다. 브라우저(localStorage)에 남겨 보여준다.
+ */
+type LastRun = {
+  productNo: number | '';
+  productName: string;
+  fileName: string;
+  parsed: number;
+  /** 이전 실행에서 이어하기로 이미 끝난 구간(이번 실행에서 dispatch되지 않아 results에 없다). */
+  resumed: number;
+  written: number;
+  already: number;
+  failed: number;
+  /** 아직 게시판에 등록되지 않은 건수 = parsed - resumed - written - already. */
+  notRegistered: number;
+  at: number;
 };
 
 type GoodsPayload = {
@@ -78,12 +99,32 @@ const IMPORT_BATCH = 50;
 // 배치 요청 클라이언트 타임아웃. 서버 함수가 60초 제한에 죽거나 응답이 늦어도
 // 화면이 무한 대기하지 않게 넉넉히 끊는다(끊겨도 재개 지점이 남고, 재전송은 서버가 걸러낸다).
 const BATCH_FETCH_TIMEOUT_MS = 70000;
-// 이어서 보낸 배치가 이만큼 연속 실패하면 이관 전체를 멈춘다(인증·시스템 오류 감지용).
-// 진짜 시스템 오류는 재시도해도 계속 실패해 멈춘다.
-const MAX_CONSEC_FAILS = 5;
+// 성공 배치를 다시 보내기 전 배치 사이 잠깐 쉰다 — 서버 예산·회복 시간을 존중한다.
+const RETRY_PAUSE_MS = 5000;
+// 진행 없이 실패가 이어질 때 물러나 기다리는 시간(30→60→120초에서 머문다).
+// 일시적 오류·점검으로 막혀도 회복되는 대로 바로 이어간다. 사용자는 「정지」로 멈춘다.
+const BACKOFF_STEPS_MS = [30000, 60000, 120000];
+// 삭제 요청 클라이언트 타임아웃. 서버가 함수 예산(45초) 안에서 반드시 응답하므로
+// 여유를 두고 끊는다 — "삭제하는 중…"에 갇히지 않게.
+const DELETE_FETCH_TIMEOUT_MS = 70000;
 // 삭제 API는 1건/호출이라(고도몰엔 bulk 삭제 엔드포인트가 없다) 서버리스 시간 제한을
 // 넘기지 않게 한 요청당 50건만 보낸다 — 서버 MAX_DELETE와 일치.
 const DELETE_CHUNK = 50;
+
+/** localStorage에 마지막 이관 요약을 남기는 키. */
+const lastRunKey = (mall: string) => `godo-lastrun:${mall}`;
+
+/**
+ * 백오프 대기 — ms 동안 기다리면서 1초마다 남은 시간을 onTick으로 알린다.
+ * checkStop()이 참을 내면 일찍 끝난다(정지·한도 소진 등).
+ */
+async function backoffWait(ms: number, checkStop: () => boolean, onTick: (sec: number) => void) {
+  const until = Date.now() + ms;
+  while (until > Date.now() && !checkStop()) {
+    onTick(Math.ceil((until - Date.now()) / 1000));
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
 
 function fmtDate(iso: string | null | undefined): string {
   if (!iso) return '';
@@ -174,11 +215,14 @@ export default function Admin() {
   const [busy, setBusy] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
+  const [lastRun, setLastRun] = useState<LastRun | null>(null);
   const [importProgress, setImportProgress] = useState<{
     written: number;
     total: number;
     failed: number;
     resuming: boolean;
+    /** 백오프 대기 중 — N초 뒤 자동으로 이어서 재시도합니다. */
+    retrying: number | null;
   } | null>(null);
   const [imports, setImports] = useState<ImportedReview[] | null>(null);
   const [importedError, setImportedError] = useState('');
@@ -192,6 +236,10 @@ export default function Admin() {
   const [parsed, setParsed] = useState<ParsedReview[] | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [showNotice, setShowNotice] = useState(false);
+  // 이관 중 「정지」를 눌렀음을 기록한다 — run(진행 루프)이 이를 보고 깨끗하게 멈춘다.
+  const stopRef = useRef(false);
+  // 이관 중 화면이 잠자지 않게(Sleep 방지) Wake Lock을 잡는다.
+  const wakeLockRef = useRef<Awaited<ReturnType<Navigator['wakeLock']['request']>> | null>(null);
 
   useEffect(() => {
     fetch('/api/goods')
@@ -234,6 +282,15 @@ export default function Admin() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadImports(1, '');
   }, [loadImports]);
+
+  useEffect(() => {
+    // 지난 이관 요약 — 원장은 성공분만 담으므로 미등록 건수를 여기서 알려준다.
+    try {
+      const raw = localStorage.getItem(lastRunKey(mallName));
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      if (raw) setLastRun(JSON.parse(raw) as LastRun);
+    } catch {}
+  }, [mallName]);
 
   useEffect(() => {
     // 앱 안정성 안내 팝업 — 같은 브라우저 세션에서는 한 번만 띄운다.
@@ -279,6 +336,11 @@ export default function Admin() {
     setBusy(true);
     setParsing(!parsed);
     setResult(null);
+    // 이관이 수십 분 걸릴 수도 있으므로 화면이 잠자지 않게 Wake Lock을 잡는다.
+    stopRef.current = false;
+    try {
+      wakeLockRef.current = 'wakeLock' in navigator ? await navigator.wakeLock.request('screen') : null;
+    } catch {}
 
     let reviews = parsed;
     if (!reviews) {
@@ -315,57 +377,81 @@ export default function Admin() {
       return;
     }
 
-    // 실제 이관 — IMPORT_BATCH건씩 순차 배치로 보낸다. 한 배치가 막혀도 전체를 멈추지 않고
-    // 이어서 보내고, 끝나고 한 번 더 재시도한다. 연속 MAX_CONSEC_FAILS번 실패는 시스템
-    // 오류로 보고 멈춘다. 성공분은 배치마다 즉시 원장에 남아 목록·삭제에서 복구되며,
-    // 재전송분은 서버가 "게시판에 확인된" 내용 해시로 걸러 중복 등록을 막는다(부분 멱등).
+    // 실제 이관 — IMPORT_BATCH건씩 배치로 보내고, 실패 배치는 자동으로 이어서 재시도한다.
+    // 한 번 누르면 끝날 때까지 진행하며(2026-09), 성공분은 배치마다 즉시 원장에 남아
+    // 목록·삭제에서 복구된다. 재전송분은 서버가 내용 해시로 걸러 중복을 막는다(부분 멱등).
     const rkey = resumeKey(productNo, file);
     const batchCount = Math.ceil(reviews.length / IMPORT_BATCH);
     let resumeIdx = Math.floor(readResume(rkey) / IMPORT_BATCH);
     if (resumeIdx >= batchCount) resumeIdx = 0;
+    // 이전 실행에서 완료된 구간(이번 실행에서 dispatch되지 않아 results에 안 잡힌다).
+    // 요약의 "미등록" 계산에 이 값을 더해야 이어하기 때도 정확하다.
+    const startResumeIdx = resumeIdx;
     const resuming = resumeIdx > 0;
-    let totalWritten = 0;
-    let totalRejected = 0;
-    let totalAlready = 0;
     let attempted = resumeIdx * IMPORT_BATCH;
     let quotaExhausted = false;
-    let consecFails = 0;
-    let abortMsg = '';
-    let stoppedByConsecFails = false;
     let usedNow = quota?.used ?? 0;
-    const results: ({ written: number; failed: number; already: number } | null)[] = new Array(batchCount).fill(null);
-    // 재개(resume)로 건너뛴 앞부분 배치는 "이미 완료"로 채워 둔다 — 그렇지 않으면 아래
-    // firstGap이 항상 0이 돼 재개 지점이 사라지고 남은 건수 계산도 부풀려진다.
-    for (let i = 0; i < resumeIdx; i++) results[i] = { written: 0, failed: 0, already: 0 };
+    const done = new Array<boolean>(batchCount).fill(false);
+    const results: ({ written: number; failed: number; already: number } | null)[] =
+      new Array(batchCount).fill(null);
+    // 재시도로 풀리지 않는 오류로 끝난 배치 — 자동 이어하기에서 제외한다.
+    const permanent = new Array<boolean>(batchCount).fill(false);
+    const permanentCounts = new Array<number>(batchCount).fill(0);
     let freeRemaining: number | null = quota?.paid
       ? null
       : Math.max(0, (quota?.limit ?? 20) - (quota?.used ?? 0));
-    setImportProgress({ written: attempted, total: reviews.length, failed: 0, resuming });
+    setImportProgress({ written: attempted, total: reviews.length, failed: 0, resuming, retrying: null });
 
-    const saveAt = (idx: number) => {
-      const off = Math.min(idx * IMPORT_BATCH, reviews.length);
-      saveProgress(rkey, off);
-      setImportProgress({ written: attempted, total: reviews.length, failed: totalRejected, resuming });
+    const saveProgressAndState = () => {
+      saveProgress(rkey, Math.min(resumeIdx * IMPORT_BATCH, reviews.length));
+      setImportProgress({
+        written: Math.max(attempted, resumeIdx * IMPORT_BATCH),
+        total: reviews.length,
+        failed: results.reduce((s, r) => s + (r?.failed ?? 0), 0),
+        resuming,
+        retrying: null,
+      });
     };
-    const setUsedFromFree = (free: number, paid?: boolean) => {
-      if (paid) return;
-      setQuota((q) => (q ? { ...q, used: Math.max(q.used, (q.limit ?? 20) - free) } : q));
+    const sliceLen = (idx: number) => Math.min(IMPORT_BATCH, reviews.length - idx * IMPORT_BATCH);
+    const bumpAttempted = (idx: number) => {
+      if (results[idx] === null) attempted += sliceLen(idx);
     };
-    const applyJson = (idx: number, json: { written?: number; failed?: number; already?: number; freeRemaining?: number | null; paid?: boolean }) => {
-      const written = json.written ?? 0;
-      const failed = json.failed ?? 0;
-      const already = json.already ?? 0;
-      results[idx] = { written, failed, already };
-      totalWritten += written;
-      totalRejected += failed;
-      totalAlready += already;
-      attempted += (idx + 1) * IMPORT_BATCH <= reviews.length ? IMPORT_BATCH : reviews.length - idx * IMPORT_BATCH;
+
+    const onBatchDone = (
+      idx: number,
+      json: {
+        written?: number;
+        failed?: number;
+        already?: number;
+        permanentFailed?: number;
+        freeRemaining?: number | null;
+        paid?: boolean;
+        quotaExhausted?: boolean;
+      },
+    ) => {
+      bumpAttempted(idx);
+      // 실패가 전부 재시도 불가(영구)일 때만 이 배치의 자동 재시도를 멈춘다.
+      const failedCount = json.failed ?? 0;
+      permanentCounts[idx] = json.permanentFailed ?? 0;
+      if (failedCount > 0 && permanentCounts[idx] >= failedCount) permanent[idx] = true;
       if (json.freeRemaining !== undefined && json.freeRemaining !== null) {
         freeRemaining = json.freeRemaining;
-        setUsedFromFree(freeRemaining, json.paid);
         if (!json.paid) usedNow = (quota?.limit ?? 20) - freeRemaining;
       }
-      setImportProgress({ written: attempted, total: reviews.length, failed: totalRejected, resuming });
+      if (json.quotaExhausted) {
+        // 무료 한도가 배치 도중 소진 — 이 배치의 나머지는 아직 안 옮겨졌다. 완료 구간에
+        // 넣지 않고 중단해, 유료 전환 후 이 배치부터 이어서 하게 둔다.
+        quotaExhausted = true;
+        saveProgress(rkey, resumeIdx * IMPORT_BATCH);
+        setResult({ quotaExceeded: true, used: usedNow });
+        setQuota((q) => (q ? { ...q, used: q.limit } : q));
+        return;
+      }
+      results[idx] = { written: json.written ?? 0, failed: json.failed ?? 0, already: json.already ?? 0 };
+      done[idx] = true;
+      // 완료된 연속 구간만큼 재개 지점을 전진시킨다.
+      while (resumeIdx < batchCount && done[resumeIdx]) resumeIdx++;
+      saveProgressAndState();
     };
 
     /** 한 배치를 보낸다. 'ok'/'quota'/'err' 셋 중 하나로 돌아온다. */
@@ -395,95 +481,184 @@ export default function Admin() {
       }
     };
 
+    /** 실패한 배치를 자동 이어하기에서 다시 보낸다. 결과는 최종값으로 교체한다. */
+    const sendRetry = async (idx: number): Promise<boolean> => {
+      const slice = reviews.slice(idx * IMPORT_BATCH, (idx + 1) * IMPORT_BATCH);
+      try {
+        const res = await fetch('/api/reviews/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(BATCH_FETCH_TIMEOUT_MS),
+          body: JSON.stringify({ product_no: productNo, source, reviews: slice }),
+        });
+        const json = (await res.json().catch(() => ({}))) as {
+          written?: number;
+          failed?: number;
+          already?: number;
+          permanentFailed?: number;
+          freeRemaining?: number | null;
+          paid?: boolean;
+          quotaExhausted?: boolean;
+        };
+        if (res.status === 402 || json.quotaExhausted) {
+          quotaExhausted = true;
+          return false;
+        }
+        if (!res.ok) return false; // 재시도도 실패 — 그대로 둔다
+        const retryFailed = json.failed ?? 0;
+        permanentCounts[idx] = json.permanentFailed ?? 0;
+        if (retryFailed > 0 && permanentCounts[idx] >= retryFailed) permanent[idx] = true;
+        // 재시도 응답의 written/already는 이 배치의 최종 상태를 온전히 담는다(서버가
+        // 원장을 기준으로 이미 등록된 건을 already로 돌려준다). 이전 시도의 부분 성공을
+        // written에 더하면 이중 계산되므로, 응답값으로 교체한다.
+        results[idx] = { written: json.written ?? 0, failed: json.failed ?? 0, already: json.already ?? 0 };
+        if (json.freeRemaining !== undefined && json.freeRemaining !== null) {
+          freeRemaining = json.freeRemaining;
+          if (!json.paid) usedNow = (quota?.limit ?? 20) - freeRemaining;
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const productName = products.find((p) => p.no === productNo)?.name ?? `상품 ${productNo}`;
+    // 이전 실행에서 끝난 구간 — 이번 실행의 results엔 안 잡히므로 "미등록" 계산에 더한다.
+    const resumedCount = Math.min(startResumeIdx * IMPORT_BATCH, reviews.length);
+    const persistSummary = (over: Partial<LastRun> = {}) => {
+      const resumed = resumedCount;
+      const written = over.written ?? results.reduce((s, r) => s + (r?.written ?? 0), 0);
+      const already = over.already ?? results.reduce((s, r) => s + (r?.already ?? 0), 0);
+      const failed = over.failed ?? results.reduce((s, r) => s + (r?.failed ?? 0), 0);
+      saveLastRun({
+        productNo,
+        productName,
+        fileName: file?.name ?? '',
+        parsed: reviews.length,
+        resumed,
+        written,
+        already,
+        failed,
+        notRegistered: Math.max(0, reviews.length - resumed - written - already),
+      });
+    };
+
     try {
       for (let idx = resumeIdx; idx < batchCount; idx++) {
-        if (quotaExhausted) break;
-        let r = await sendOne(idx);
+        if (quotaExhausted || stopRef.current) break;
+        const r = await sendOne(idx);
         if (r.kind === 'quota') {
           // 무료 한도 소진 — 여기까지 기록된 것을 남기고 중단한다.
           quotaExhausted = true;
           usedNow = r.json.used ?? usedNow;
-          saveAt(idx);
+          saveProgress(rkey, resumeIdx * IMPORT_BATCH);
+          setResult({ quotaExceeded: true, used: usedNow });
+          setQuota((q) => (q ? { ...q, used: q.limit } : q));
           break;
         }
         if (r.kind === 'err') {
-          // 배치 하나가 실패해도 전체를 멈추지 않는다. 실패 배치는 끝에서 한 번 더 시도한다.
-          consecFails++;
-          if (!abortMsg) abortMsg = r.msg;
-          if (consecFails >= MAX_CONSEC_FAILS) {
-            stoppedByConsecFails = true;
-            break;
-          }
-          r = await sendOne(idx); // 같은 실행 안 1회 재시도
-          if (r.kind === 'quota') {
-            quotaExhausted = true;
-            usedNow = r.json.used ?? usedNow;
-            saveAt(idx);
-            break;
-          }
-          if (r.kind === 'err') {
-            // 재시도도 실패 — results에 기록하지 않아(미완료) 재개 지점이 이 배치에 남는다.
-            // 다음 「옮기기」가 이 배치부터 다시 시도한다(중복은 서버가 걸러낸다).
-            continue;
-          }
-          consecFails = 0;
-          applyJson(idx, r.json);
-          if (r.json.quotaExhausted) {
-            quotaExhausted = true;
-            usedNow = (quota?.limit ?? 20) - (r.json.freeRemaining ?? 0);
-            saveAt(idx);
-            break;
-          }
+          // 배치 하나가 실패해도 전체를 멈추지 않는다 — 실패로 기록하고 아래 자동
+          // 이어하기 루프에서 물러나 다시 시도한다.
+          bumpAttempted(idx);
+          results[idx] = { written: 0, failed: sliceLen(idx), already: 0 };
           continue;
         }
-        consecFails = 0;
-        applyJson(idx, r.json);
-        if (r.json.quotaExhausted) {
-          // 무료 한도가 배치 도중 소진 — 이 배치의 일부만 옮겨졌다. 여기까지를 남기고 중단해,
-          // 유료 전환 후 이 배치부터 이어서 하게 둔다.
-          quotaExhausted = true;
-          usedNow = (quota?.limit ?? 20) - (r.json.freeRemaining ?? freeRemaining ?? 0);
-          saveAt(idx);
-          break;
+        onBatchDone(idx, r.json);
+      }
+
+      if (!quotaExhausted && !stopRef.current) {
+        // 자동 이어하기 루프 — 성공 배치는 해시로 걸러져(already) 안전하므로, 한 번의
+        // 「옮기기」로 파일 전체가 끝날 때까지 반복 진행한다. 실패가 이어지면
+        // 30→60→120초로 물러나 기다렸다가 다시 시도하고, 사용자가 「정지」를 누르거나
+        // 무료 한도가 소진된 경우에만 멈춘다.
+        let backoffStep = 0;
+        while (!quotaExhausted && !stopRef.current) {
+          const failedIdxs: number[] = [];
+          for (let idx = 0; idx < batchCount; idx++) {
+            // 영구 실패(400·422·행 단위 거부) 배치는 다시 시도해도 실패한다 — 무한 재시도를 막는다.
+            if (permanent[idx]) continue;
+            const r = results[idx];
+            if (!r || r.failed > 0) failedIdxs.push(idx);
+          }
+          if (!failedIdxs.length) break;
+          if (backoffStep > 0) {
+            // 진행 없이 실패가 이어진 라운드 — 물러난 뒤 다시 시도한다.
+            const waitMs = BACKOFF_STEPS_MS[Math.min(backoffStep - 1, BACKOFF_STEPS_MS.length - 1)];
+            await backoffWait(
+              waitMs,
+              () => stopRef.current || quotaExhausted,
+              (sec) => setImportProgress((p) => (p ? { ...p, retrying: sec } : p)),
+            );
+            if (stopRef.current || quotaExhausted) break;
+          }
+          let anyProgress = false;
+          for (const idx of failedIdxs) {
+            if (quotaExhausted || stopRef.current) break;
+            const ok = await sendRetry(idx);
+            if (ok) {
+              const rr = results[idx];
+              if (rr && rr.failed === 0) {
+                anyProgress = true;
+                done[idx] = true;
+                while (resumeIdx < batchCount && done[resumeIdx]) resumeIdx++;
+                saveProgressAndState();
+              }
+            }
+          }
+          backoffStep = anyProgress ? 0 : backoffStep + 1;
+          if (!stopRef.current && !quotaExhausted && failedIdxs.length) {
+            await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
+          }
         }
       }
 
-      const firstGap = results.findIndex((r) => r === null);
-      if (stoppedByConsecFails && !quotaExhausted) {
-        // 연속 실패로 중단 — 진행 지점을 남겨 다음 「옮기기」가 이어서 진행하게 한다.
-        saveAt(firstGap >= 0 ? firstGap : batchCount);
-        setResult({
-          stage: 'write',
-          parsed: reviews.length,
-          written: totalWritten,
-          failed: totalRejected,
-          already: totalAlready,
-          skipped: reviews.length - totalWritten - totalAlready,
-          error: abortMsg,
-        });
-      } else if (quotaExhausted) {
-        // 한도 소진으로 중단해도 여기까지 옮겨진 글은 목록에 보이게 한다.
+      const totalWritten = results.reduce((s, r) => s + (r?.written ?? 0), 0);
+      const totalFailed = results.reduce((s, r) => s + (r?.failed ?? 0), 0);
+      const totalAlready = results.reduce((s, r) => s + (r?.already ?? 0), 0);
+      const totalPermanentFailed = permanentCounts.reduce((s, n) => s + n, 0);
+
+      if (quotaExhausted) {
+        persistSummary();
         setResult({ quotaExceeded: true, used: usedNow });
         setQuota((q) => (q ? { ...q, used: q.limit } : q));
         loadImports(1, filterProduct);
-      } else {
-        if (firstGap >= 0) saveAt(firstGap);
-        else {
-          try {
-            localStorage.removeItem(rkey);
-          } catch {
-            // 저장소 접근이 거부되면 남은 진행 지점이 다음 번에 재개로 오인될 수 있지만,
-            // offset >= reviews.length면 readResume이 0으로 되돌리므로 실제 영향은 없다.
-          }
+      } else if (totalFailed > 0 || resumeIdx < batchCount) {
+        // 「정지」를 누르거나 영구 실패로 남은 건이 있다 — 여기까지 기록되고 다음
+        // 「옮기기」가 이어서 진행한다(중복은 서버가 걸러낸다).
+        persistSummary();
+        saveProgress(rkey, resumeIdx * IMPORT_BATCH);
+        loadImports(1, filterProduct);
+        setResult({
+          stage: 'stopped',
+          parsed: reviews.length,
+          written: totalWritten,
+          failed: totalFailed,
+          permanentFailed: totalPermanentFailed,
+          already: totalAlready,
+          skipped: Math.max(0, reviews.length - resumedCount - totalWritten - totalAlready),
+          freeRemaining,
+          paid: quota?.paid,
+        });
+        if (!quota?.paid && typeof freeRemaining === 'number') {
+          const used = (quota?.limit ?? 20) - freeRemaining;
+          setQuota((q) => (q ? { ...q, used } : q));
         }
-        // 파일 전체 중 아직 게시판에 없는 건수 = 다시 보내면 이어서 등록되는 건수.
-        const skipped = reviews.length - totalWritten - totalAlready;
+      } else {
+        // 전부 옮겨졌다 — 이어올 지점을 지운다.
+        persistSummary();
+        try {
+          localStorage.removeItem(rkey);
+        } catch {
+          // 저장소 접근이 거부되면 남은 진행 지점이 다음 번에 재개로 오인될 수 있지만,
+          // offset >= reviews.length면 readResume이 0으로 되돌리므로 실제 영향은 없다.
+        }
         setResult({
           parsed: reviews.length,
           written: totalWritten,
-          failed: totalRejected,
+          failed: 0,
+          permanentFailed: totalPermanentFailed,
           already: totalAlready,
-          skipped,
+          skipped: Math.max(0, reviews.length - resumedCount - totalWritten - totalAlready),
           freeRemaining,
           paid: quota?.paid,
         });
@@ -496,20 +671,25 @@ export default function Admin() {
       }
     } catch (e) {
       // 중간 실패 — 진행 지점을 남겨 두어 다음 「옮기기」가 이어서 진행하게 한다.
-      const firstGap = results.findIndex((r) => r === null);
-      saveAt(firstGap >= 0 ? firstGap : resumeIdx);
+      persistSummary();
+      saveProgress(rkey, resumeIdx * IMPORT_BATCH);
       setResult({
         stage: 'write',
         parsed: reviews.length,
-        written: totalWritten,
-        failed: totalRejected,
-        already: totalAlready,
-        skipped: reviews.length - totalWritten - totalAlready,
+        written: results.reduce((s, r) => s + (r?.written ?? 0), 0),
+        failed: results.reduce((s, r) => s + (r?.failed ?? 0), 0),
+        permanentFailed: permanentCounts.reduce((s, n) => s + n, 0),
+        already: results.reduce((s, r) => s + (r?.already ?? 0), 0),
+        skipped: reviews.length - results.reduce((s, r) => s + (r?.written ?? 0) + (r?.already ?? 0), 0),
         error: (e as Error).message,
       });
     } finally {
       setBusy(false);
       setImportProgress(null);
+      try {
+        await wakeLockRef.current?.release();
+      } catch {}
+      wakeLockRef.current = null;
     }
   }
 
@@ -519,6 +699,15 @@ export default function Admin() {
     } catch {
       // 저장소 접근이 거부되면(iframe·비공개 모드) 재개 지점을 못 남기지만 진행은 계속한다.
     }
+  }
+
+  /** 지난 이관 요약을 브라우저에 남긴다(서버 저장 없음). */
+  function saveLastRun(summary: Omit<LastRun, 'at'>) {
+    const rec: LastRun = { ...summary, at: Date.now() };
+    try {
+      localStorage.setItem(lastRunKey(mallName), JSON.stringify(rec));
+    } catch {}
+    setLastRun(rec);
   }
 
   async function deleteImports(snos: number[]) {
@@ -536,6 +725,7 @@ export default function Admin() {
         const res = await fetch('/api/imports', {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(DELETE_FETCH_TIMEOUT_MS),
           body: JSON.stringify({ article_snos: chunk }),
         });
         const json = await res.json().catch(() => ({}));
@@ -591,6 +781,7 @@ export default function Admin() {
         const res = await fetch('/api/imports', {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(DELETE_FETCH_TIMEOUT_MS),
           body: JSON.stringify({ all: true, product_no: filterProduct || undefined }),
         });
         const json = await res.json().catch(() => ({}));
@@ -744,6 +935,16 @@ export default function Admin() {
               ? '읽는 중…'
               : '옮기기'}
         </button>
+        {busy && !parsing && importProgress && (
+          <button
+            onClick={() => {
+              stopRef.current = true;
+            }}
+            className="rounded border px-4 py-2 text-sm text-red-600 disabled:opacity-40 dark:border-neutral-600 dark:text-red-400"
+          >
+            정지
+          </button>
+        )}
       </div>
 
       {!busy && !parsing && (!file || !productNo) && (
@@ -779,6 +980,11 @@ export default function Admin() {
                 : '0%'}
             </span>
           </div>
+          {importProgress.retrying != null && (
+            <p className="mt-1 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+              일시적으로 등록이 막혀 {importProgress.retrying}초 뒤 자동으로 이어서 시도합니다.
+            </p>
+          )}
           <div className="mt-2 h-1.5 w-full rounded-full bg-neutral-100 dark:bg-neutral-700">
             <div
               className="h-1.5 rounded-full bg-black transition-all dark:bg-white"
@@ -792,9 +998,9 @@ export default function Admin() {
             />
           </div>
           <p className="mt-1 text-[11px] text-neutral-400 dark:text-neutral-500">
-            한 번에 {IMPORT_BATCH}건씩 나눠 옮겨서, 1만 건도 끊기지 않게 진행합니다. 중간에
-            멈추면 이 화면에서 다시 눌러 이어서 하세요. 이미 옮겨진 리뷰를 다시 보내도 중복
-            등록되지 않습니다.
+            한 번 누르면 끝날 때까지 자동으로 이어서 옮깁니다. 도중에 등록이 막혀도 물러났다
+            자동으로 다시 시도하고, 걸릴 만큼 길면 「정지」를 눌러 주세요. 이미 옮긴 리뷰를 다시
+            보내도 중복 등록되지 않습니다.
           </p>
         </div>
       )}
@@ -810,6 +1016,21 @@ export default function Admin() {
         <div className="mt-6 rounded bg-neutral-50 p-4 text-sm dark:bg-neutral-800/60">
           {result.quotaExceeded ? (
             <PlanCard quota={quota} plan={plan} />
+          ) : result.stage === 'stopped' ? (
+            <>
+              <p className="font-medium text-amber-700 dark:text-amber-400">
+                정지했습니다. 여기까지 {result.written}건은 옮겨져 목록에 남아 있습니다.
+              </p>
+              <p className="mt-1 text-xs text-neutral-600 dark:text-neutral-400">
+                남은 리뷰는 「옮기기」를 누르면 중복 없이 이어서 등록됩니다.
+              </p>
+              {(result.permanentFailed ?? 0) > 0 ? (
+                <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                  (고도몰이 거부한 {result.permanentFailed}건은 다시 시도해도 실패할 수 있어요. 상품·작성자
+                  정보를 확인해 주세요.)
+                </p>
+              ) : null}
+            </>
           ) : result.stage === 'no-file' || result.stage === 'no-product' ? (
             <div>
               <p className="font-medium text-amber-700 dark:text-amber-400">
@@ -873,19 +1094,15 @@ export default function Admin() {
               <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
                 이제 상품 상세페이지에서 확인할 수 있습니다.
               </p>
-              {(() => {
-                // 파일 전체 중 아직 게시판에 없는 건수 — 고객이 "다 올라갔다"고 오해하지 않게 명확히 보여준다.
-                const remaining = Math.max(0, (result.parsed ?? 0) - (result.written ?? 0) - (result.already ?? 0));
-                return remaining > 0 ? (
-                  <p className="mt-1 text-xs font-medium text-amber-600 dark:text-amber-400">
-                    파일의 {result.parsed}건 중 아직 {remaining}건이 등록되지 않았어요.{' '}
-                    「옮기기」를 다시 누르면 중복 없이 이어서 등록됩니다.
-                  </p>
-                ) : null;
-              })()}
-              {(result.failed ?? 0) > 0 ? (
+              {(result.skipped ?? 0) > 0 ? (
+                <p className="mt-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+                  파일의 {result.parsed}건 중 아직 {result.skipped}건이 등록되지 않았어요.{' '}
+                  「옮기기」를 다시 누르면 중복 없이 이어서 등록됩니다.
+                </p>
+              ) : null}
+              {(result.permanentFailed ?? 0) > 0 ? (
                 <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-                  (고도몰에서 거부된 {result.failed}건은 다시 눌러도 실패할 수 있어요)
+                  (고도몰이 거부한 {result.permanentFailed}건은 다시 눌러도 실패할 수 있어요)
                 </p>
               ) : null}
               {(result.already ?? 0) > 0 ? (
@@ -920,6 +1137,36 @@ export default function Admin() {
           삭제하면 쇼핑몰 게시판에서도 함께 지워집니다. 목록은 {PAGE_SIZE}건씩 보여드립니다.
           새로 옮긴 리뷰는 바로 여기 나타납니다.
         </p>
+
+        {lastRun && (
+          <div className="mt-3 rounded border border-neutral-200 bg-neutral-50 p-3 text-xs dark:border-neutral-700 dark:bg-neutral-800">
+            <p className="font-medium text-neutral-700 dark:text-neutral-200">최근 이관 요약</p>
+            <p className="mt-1 text-neutral-600 dark:text-neutral-400">
+              {lastRun.fileName ? `'${lastRun.fileName}' ` : ''}전체 {lastRun.parsed}건 중{' '}
+              <span className="font-semibold text-neutral-800 dark:text-neutral-100">
+                {(lastRun.resumed ?? 0) + lastRun.written + lastRun.already}건 등록
+              </span>
+              {lastRun.notRegistered > 0 ? (
+                <>
+                  {' · '}
+                  <span className="font-semibold text-amber-700 dark:text-amber-400">
+                    {lastRun.notRegistered}건 미등록
+                  </span>
+                </>
+              ) : null}
+              {' '}({new Date(lastRun.at).toLocaleString('ko-KR')})
+            </p>
+            {lastRun.notRegistered > 0 ? (
+              <p className="mt-1 text-neutral-500 dark:text-neutral-400">
+                미등록 리뷰는 아직 게시판에 올라가지 않은 건입니다. 같은 엑셀로 「옮기기」를 다시 누르면
+                중복 없이 이어서 등록됩니다.
+                {lastRun.failed > 0
+                  ? ' (일부는 고도몰이 거부한 건이라, 「옮기기」 결과의 안내를 함께 확인해 주세요.)'
+                  : ''}
+              </p>
+            ) : null}
+          </div>
+        )}
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <select
