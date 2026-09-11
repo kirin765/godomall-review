@@ -42,6 +42,8 @@ export async function GET(req: NextRequest) {
   if (!session) return NextResponse.json({ error: 'no session' }, { status: 401 });
   const sp = req.nextUrl.searchParams;
   const productNo = Number(sp.get('product_no')) || undefined;
+  // 사진 누락(photo_dropped)만 보기 — 저장 공간 복구 후 대상만 골라 삭제·재이관하기 위함.
+  const photoDroppedOnly = sp.get('photo_dropped') === '1';
   const page = Math.max(1, Number(sp.get('page')) || 1);
   const pageSize = Math.min(200, Math.max(1, Number(sp.get('page_size')) || 50));
   try {
@@ -50,7 +52,7 @@ export async function GET(req: NextRequest) {
     await reconcileImports(session.accessToken, session.mallNo).catch((e) =>
       console.error('[imports] reconcile failed', (e as Error).message),
     );
-    const pageData = await listImports(session.mallNo, { productNo, page, pageSize });
+    const pageData = await listImports(session.mallNo, { productNo, photoDroppedOnly, page, pageSize });
     if (!pageData)
       return NextResponse.json(
         { error: '저장소가 연결되지 않았습니다. 잠시 후 다시 시도해 주세요.' },
@@ -75,6 +77,7 @@ export async function DELETE(req: NextRequest) {
     article_snos?: number[];
     all?: boolean;
     product_no?: number;
+    photo_dropped?: boolean;
   };
 
   let snos: number[] = [];
@@ -82,7 +85,9 @@ export async function DELETE(req: NextRequest) {
   if (body.all) {
     // 전체 삭제: 원장에서 MAX_DELETE+1건을 가져와 초과분이 있으면 계속 이어받게 한다.
     const productNo = Number(body.product_no) || undefined;
-    const picked = (await listArticleNos(session.mallNo, productNo, MAX_DELETE + 1)) ?? [];
+    const photoDroppedOnly = body.photo_dropped === true;
+    const picked =
+      (await listArticleNos(session.mallNo, { productNo, photoDroppedOnly }, MAX_DELETE + 1)) ?? [];
     hasMore = picked.length > MAX_DELETE;
     snos = picked.slice(0, MAX_DELETE);
   } else {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sessionMall } from '@/lib/launch';
-import { checkQuota, addUsage, FREE_LIMIT } from '@/lib/quota';
+import { checkQuota, reserveQuota, releaseQuota, FREE_LIMIT } from '@/lib/quota';
 import { getEntitlement } from '@/lib/entitlement';
 import { writeReviews, toNewImport } from '@/lib/writeReviews';
 import { maskWriter, type ImportedReview } from '@/lib/reviewImport';
@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
     createdAt: r.createdAt ? String(r.createdAt).slice(0, 40) : null,
     option: r.option ? String(r.option).slice(0, 200) : null,
     productName: r.productName ? String(r.productName).slice(0, 200) : null,
-    imageUrl: r.imageUrl ? String(r.imageUrl).slice(0, 2000) : null,
+    images: Array.isArray(r.images) ? r.images.map(String).slice(0, 5) : [],
   }));
 
   // 이미 게시판에 확인된 리뷰를 내용 해시로 걸러낸다 (부분 멱등 — article_sno 확정분만).
@@ -75,34 +75,56 @@ export async function POST(req: NextRequest) {
   const already = reviews.length - pending.length;
 
   const ent = await getEntitlement(session.mallNo, session.accessToken);
-  const quota = ent.paid
-    ? { allowed: pending.length, configured: true, used: 0 }
-    : await checkQuota(session.mallNo, pending.length, false);
-  if (pending.length && !quota.configured) {
-    return NextResponse.json({ error: 'review quota is not configured' }, { status: 503 });
-  }
-  if (pending.length && quota.allowed <= 0) {
-    return NextResponse.json(
-      {
-        error: `무료로 ${FREE_LIMIT}건까지 옮길 수 있어요. 계속 쓰시려면 유료로 전환해 주세요.`,
-        used: quota.used,
-        already,
-      },
-      { status: 402 },
-    );
+  let used = 0;
+  let toWrite = pending;
+  if (!ent.paid) {
+    const quota = await checkQuota(session.mallNo, pending.length, false);
+    if (pending.length && !quota.configured) {
+      return NextResponse.json({ error: 'review quota is not configured' }, { status: 503 });
+    }
+    if (pending.length && quota.allowed <= 0) {
+      return NextResponse.json(
+        {
+          error: `무료로 ${FREE_LIMIT}건까지 옮길 수 있어요. 계속 쓰시려면 유료로 전환해 주세요.`,
+          used: quota.used,
+          already,
+        },
+        { status: 402 },
+      );
+    }
+    // 무료면 쓰기 전에 한도를 원자적으로 예약한다 — 동시 요청이 같은 잔여 한도를 보고
+    // 같이 넘는 일을 막는다. 실제로 못 쓴 분량은 아래에서 돌려준다.
+    if (pending.length) {
+      const want = Math.min(quota.allowed, pending.length);
+      const reserved = await reserveQuota(session.mallNo, want);
+      used = reserved.used;
+      if (!reserved.ok) {
+        return NextResponse.json(
+          {
+            error: `무료로 ${FREE_LIMIT}건까지 옮길 수 있어요. 계속 쓰시려면 유료로 전환해 주세요.`,
+            used,
+            already,
+          },
+          { status: 402 },
+        );
+      }
+      toWrite = pending.slice(0, want);
+    }
   }
 
-  // 무료면 잔여 한도만큼만 쓴다(쓰기 후 실제 성공분만 addUsage로 집계 — 클라이언트가
-  // 단일 배치씩 순차로 보내므로 카페24판의 원자적 예약은 불필요).
-  const toWrite = pending.slice(0, quota.allowed);
-  const { written, failed, permanentFailed, failMessage } = await writeReviews(
+  const { written, failed, photoDropped, permanentFailed, failMessage } = await writeReviews(
     session.accessToken,
     session.mallNo,
     productNo,
     source,
     toWrite,
   );
-  if (!ent.paid && written) await addUsage(session.mallNo, written);
+  let unused = 0;
+  if (!ent.paid) {
+    // 예약했지만 실제로 못 쓴 분량(실패분)을 한도에 되돌려준다.
+    unused = toWrite.length - written;
+    if (unused > 0) await releaseQuota(session.mallNo, unused);
+  }
 
   // 무료 한도로 보낸 슬라이스 일부가 아예 시도되지 않은 경우에만 "한도 소진"이다.
   // (일부 실패는 failed로 반환될 뿐 한도와 무관하다.)
@@ -110,13 +132,15 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     written,
     failed,
+    // 저장 공간 부족으로 사진을 빼고 등록한 건수 — 고객에게 안내한다.
+    photoDropped,
     // 재시도로 풀리지 않는 오류(400·422·행 단위 거부)로 끝난 건수 — 클라이언트는 실패가
     // 전부 영구적일 때만 그 배치의 자동 재시도를 멈춘다.
     permanentFailed,
     already,
     quotaExhausted,
     paid: ent.paid,
-    freeRemaining: ent.paid ? null : Math.max(0, quota.allowed - written),
+    freeRemaining: ent.paid ? null : Math.max(0, FREE_LIMIT - (used - unused)),
     failMessage: failMessage.slice(0, 5),
   });
 }

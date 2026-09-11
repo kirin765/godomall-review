@@ -33,6 +33,8 @@ export type ImportedReviewRow = {
   image_url: string | null;
   created_date: string | null;
   imported_at: Date;
+  /** 쇼핑몰 저장 공간 부족 등으로 사진 없이 등록된 글. */
+  photo_dropped: boolean;
 };
 
 export type NewImport = {
@@ -40,8 +42,9 @@ export type NewImport = {
   writer: string;
   score: number;
   content: string;
-  image_url: string | null;
+  images: string[];
   created_date: string | null;
+  photo_dropped?: boolean;
   dedup_hash?: string | null;
 };
 
@@ -58,7 +61,7 @@ export function reviewHash(
     writer: string;
     score: number;
     content: string;
-    image_url?: string | null;
+    images?: string[];
     created_date?: string | null;
   },
 ): string {
@@ -67,7 +70,8 @@ export function reviewHash(
     String(r.writer ?? ''),
     String(r.score ?? ''),
     String(r.content ?? ''),
-    String(r.image_url ?? ''),
+    // 이미지 URL은 순서와 무관하게 같은 해시가 되도록 정렬한다.
+    (r.images ?? []).slice().sort().join('\u0001'),
     String(r.created_date ?? ''),
   ];
   return createHash('sha256').update(parts.join('\u0000')).digest('hex');
@@ -113,11 +117,14 @@ async function withDb<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T | nul
           image_url text,
           created_date text,
           dedup_hash text,
+          photo_dropped boolean not null default false,
           imported_at timestamptz not null default now()
         )`;
-      // 기존 배포 표에 해시 컬럼을 안전하게 얹는다. 구형 행은 dedup_hash가 NULL이라
+      // 기존 배포 표에 해시·사진누락 컬럼을 안전하게 얹는다. 구형 행은 dedup_hash가 NULL이라
       // 부분 인덱스에서 제외돼 과거 기록과 부딪히지 않는다.
       await sql`alter table ${sql(TABLE)} add column if not exists dedup_hash text`;
+      // 사진이 빠진 채 등록된 글 표시 — 저장 공간 복구 후 대상만 골라 삭제·재이관하기 위함이다.
+      await sql`alter table ${sql(TABLE)} add column if not exists photo_dropped boolean not null default false`;
       // 재전송 필터(splitByExisting)는 확인(article_sno) 여부와 무관하게 해시를 본다 —
       // 미확인 행까지 봐야 needsReconcile 판단이 되기 때문. 초기 배포에서 만든 부분 인덱스
       // (article_sno 조건 포함)는 이 쿼리를 못 타므로 조건이 넓은 인덱스로 교체한다.
@@ -160,10 +167,12 @@ export async function recordImports(mallNo: number, rows: NewImport[]): Promise<
             String(r.writer ?? '익명').slice(0, 200),
             Math.min(5, Math.max(1, Math.round(Number(r.score) || 5))),
             String(r.content ?? '').slice(0, 10000),
-            r.image_url == null ? null : String(r.image_url).slice(0, 2000),
+            r.images?.[0] == null ? null : String(r.images[0]).slice(0, 2000),
             r.created_date == null ? null : String(r.created_date).slice(0, 40),
             r.dedup_hash == null ? null : String(r.dedup_hash).slice(0, 64),
-          ] as [string, string, number, string, number, string, string | null, string | null, string | null],
+            // boolean 컬럼 — postgres 3.4.9의 배열 헬퍼 타입(string|number)에 맞춰 문자열로 넘긴다.
+            r.photo_dropped === true ? 'true' : 'false',
+          ] as [string, string, number, string, number, string, string | null, string | null, string | null, string],
       )
       .filter((r) => Number.isFinite(r[2]) && r[2] > 0);
     if (!safe.length) return;
@@ -171,7 +180,7 @@ export async function recordImports(mallNo: number, rows: NewImport[]): Promise<
       // ⚠️ postgres 3.4.9의 sql(객체배열, ...컬럼) 헬퍼는 값이 전부 정의돼 있어도
       // UNDEFINED_VALUE를 뱉는다(2026-09 실측·로컬 재현). 배열-of-배열로 직접 넣는다.
       await sql`
-        insert into ${sql(TABLE)} (import_key, mall_no, goods_no, writer, score, content, image_url, created_date, dedup_hash)
+        insert into ${sql(TABLE)} (import_key, mall_no, goods_no, writer, score, content, image_url, created_date, dedup_hash, photo_dropped)
         values ${sql(safe as unknown as readonly (string | number)[][])}
         on conflict (import_key) do nothing`;
     });
@@ -213,21 +222,29 @@ export async function splitByExisting(
   });
 }
 
-/** 이 몰이 옮긴 리뷰 목록. 상품 필터가 있으면 그 상품만. 최신순, 페이지네이션. */
+/** 목록·삭제 공통 WHERE — 상품 필터와 사진 누락(photo_dropped) 필터를 함께 조립한다. */
+function importsWhere(
+  sql: postgres.Sql,
+  mallNo: number,
+  opts: { productNo?: number; photoDroppedOnly?: boolean },
+) {
+  return sql`where mall_no = ${mallNo}
+    ${opts.productNo ? sql`and goods_no = ${opts.productNo}` : sql``}
+    ${opts.photoDroppedOnly ? sql`and photo_dropped = true` : sql``}`;
+}
+
+/** 이 몰이 옮긴 리뷰 목록. 상품·사진누락 필터, 최신순, 페이지네이션. */
 export async function listImports(
   mallNo: number,
-  opts: { productNo?: number; page?: number; pageSize?: number } = {},
+  opts: { productNo?: number; photoDroppedOnly?: boolean; page?: number; pageSize?: number } = {},
 ): Promise<{ rows: ImportedReviewRow[]; total: number } | null> {
-  const productNo = opts.productNo;
   const pageSize = Math.min(200, Math.max(1, opts.pageSize ?? 50));
   const offset = Math.max(0, (opts.page ?? 1) - 1) * pageSize;
   return withDb(async (sql) => {
-    const where = productNo
-      ? sql`where mall_no = ${mallNo} and goods_no = ${productNo}`
-      : sql`where mall_no = ${mallNo}`;
+    const where = importsWhere(sql, mallNo, opts);
     const [rows, total] = await Promise.all([
       sql<ImportedReviewRow[]>`
-        select import_key, article_sno, goods_no, writer, score, content, image_url, created_date, imported_at
+        select import_key, article_sno, goods_no, writer, score, content, image_url, created_date, imported_at, photo_dropped
         from ${sql(TABLE)} ${where}
         order by imported_at desc
         limit ${pageSize} offset ${offset}`,
@@ -246,11 +263,13 @@ export async function removeImports(mallNo: number, articleSnos: number[]): Prom
 }
 
 /** 필터에 해당하는 확인된 글 번호를 최대 limit개 꺼낸다. 전체 삭제 진행용(서버 순회). */
-export async function listArticleNos(mallNo: number, productNo?: number, limit = 50): Promise<number[] | null> {
+export async function listArticleNos(
+  mallNo: number,
+  opts: { productNo?: number; photoDroppedOnly?: boolean } = {},
+  limit = 50,
+): Promise<number[] | null> {
   return withDb(async (sql) => {
-    const where = productNo
-      ? sql`where mall_no = ${mallNo} and goods_no = ${productNo} and article_sno is not null`
-      : sql`where mall_no = ${mallNo} and article_sno is not null`;
+    const where = sql`${importsWhere(sql, mallNo, opts)} and article_sno is not null`;
     const rows = await sql<{ article_sno: number }[]>`
       select article_sno from ${sql(TABLE)} ${where} order by article_sno limit ${limit}`;
     return rows.map((r) => r.article_sno).filter((n) => n != null);

@@ -15,6 +15,8 @@ type ImportedReview = {
   image_url: string | null;
   created_date: string | null;
   imported_at: string;
+  /** 저장 공간 부족으로 사진 없이 등록된 글. */
+  photo_dropped: boolean;
 };
 type PaymentInfo = {
   method?: string;
@@ -41,10 +43,12 @@ type Result = {
   count?: number;
   allowed?: number;
   paid?: boolean;
-  sample?: { writer: string; content: string; option?: string | null; score?: number; createdAt?: string | null; imageUrl?: string | null }[];
+  sample?: { writer: string; content: string; option?: string | null; score?: number; createdAt?: string | null; images?: string[] }[];
   parsed?: number;
   written?: number;
   failed?: number;
+  /** 저장 공간 부족으로 사진을 빼고 등록한 건수 — 고객 안내용 */
+  photoDropped?: number;
   /** 재시도로 풀리지 않는 오류로 끝난 건수 — 고객 안내용 */
   permanentFailed?: number;
   /** 이미 옮겨진(게시판 확인된) 리뷰로 재전송에서 건너뛴 건수 */
@@ -72,6 +76,8 @@ type LastRun = {
   failed: number;
   /** 아직 게시판에 등록되지 않은 건수 = parsed - resumed - written - already. */
   notRegistered: number;
+  /** 사진(첨부)이 거부돼 사진 없이 등록된 건수. */
+  photoDropped: number;
   at: number;
 };
 
@@ -146,6 +152,25 @@ function BankPay({ pay, price }: { pay: PaymentInfo; price: number }) {
       <p className="mt-1">
         이체 후 {pay.contactEmail ?? '판매사'}로 입금자명을 알려주시면 확인 후 무제한으로 전환해 드립니다.
         <br />세금계산서가 필요하시면 이체와 함께 요청해 주세요.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * 저장 공간 부족으로 사진이 빠진 채 등록됐을 때의 안내.
+ * 자료실·첨부 용량을 늘린 뒤 「사진 빠진 리뷰만」에서 삭제하고 같은 엑셀을 다시 올리면 사진이 포함된다.
+ */
+function PhotoDroppedNotice({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <div className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-xs dark:border-amber-700 dark:bg-amber-950/40">
+      <p className="font-medium text-amber-900 dark:text-amber-300">
+        사진 없이 등록된 리뷰가 {count}건 있어요
+      </p>
+      <p className="mt-1 text-amber-800 dark:text-amber-400">
+        쇼핑몰의 저장 공간(첨부 용량)이 부족해 사진이 거부된 것입니다. [관리자]에서 저장 공간을 늘린 뒤,
+        「사진 빠진 리뷰만」에서 해당 리뷰를 삭제하고 같은 엑셀을 다시 옮기면 사진이 포함되어 등록됩니다.
       </p>
     </div>
   );
@@ -228,6 +253,8 @@ export default function Admin() {
   const [importedError, setImportedError] = useState('');
   const [importedMsg, setImportedMsg] = useState('');
   const [filterProduct, setFilterProduct] = useState<number | ''>('');
+  const [filterPhotoDropped, setFilterPhotoDropped] = useState(false);
+  const [photoDroppedTotal, setPhotoDroppedTotal] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [delBusy, setDelBusy] = useState(false);
   const [deleteProgress, setDeleteProgress] = useState<{ deleted: number; total: number; failed: number } | null>(null);
@@ -255,11 +282,12 @@ export default function Admin() {
       .finally(() => setLoading(false));
   }, []);
 
-  const loadImports = useCallback(async (pageNum: number, productNo: number | '') => {
+  const loadImports = useCallback(async (pageNum: number, productNo: number | '', photoDroppedOnly = false) => {
     setImportedError('');
     setImportedMsg('');
     const q = new URLSearchParams();
     if (productNo) q.set('product_no', String(productNo));
+    if (photoDroppedOnly) q.set('photo_dropped', '1');
     q.set('page', String(pageNum));
     q.set('page_size', String(PAGE_SIZE));
     fetch(`/api/imports?${q}`)
@@ -277,11 +305,30 @@ export default function Admin() {
       });
   }, []);
 
+  /** 사진 누락(photo_dropped) 건수 — 안내 표시·재이관 가드에 쓴다. */
+  const photoDroppedCount = useCallback(async (productNo: number | ''): Promise<number> => {
+    const q = new URLSearchParams({ photo_dropped: '1', page: '1', page_size: '1' });
+    if (productNo) q.set('product_no', String(productNo));
+    try {
+      const res = await fetch(`/api/imports?${q}`);
+      if (!res.ok) return 0;
+      const d = await res.json();
+      return Number(d.total ?? 0);
+    } catch {
+      return 0;
+    }
+  }, []);
+
   useEffect(() => {
     // 최초 마운트 시 1회 로드 — 로딩 상태로 시작하는 것이 의도된 동작이다.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadImports(1, '');
   }, [loadImports]);
+
+  useEffect(() => {
+    // 사진 누락 건수 — 안내·재이관 가드용. 실패해도 화면은 그대로 둔다.
+    photoDroppedCount('').then(setPhotoDroppedTotal);
+  }, [photoDroppedCount]);
 
   useEffect(() => {
     // 지난 이관 요약 — 원장은 성공분만 담으므로 미등록 건수를 여기서 알려준다.
@@ -377,6 +424,24 @@ export default function Admin() {
       return;
     }
 
+    // 사진 빠진 리뷰 재이관 가드 — 저장 공간을 늘리지 않고 다시 옮기면 같은 리뷰가
+    // 중복 등록될 수 있다. 남아 있으면 먼저 지울지 확인하고, 동의하면 지운 뒤 이어간다.
+    const droppedNow = await photoDroppedCount(productNo);
+    if (droppedNow > 0) {
+      const proceed = window.confirm(
+        `사진 없이 등록된 리뷰가 ${droppedNow}건 있습니다.\n` +
+          '저장 공간을 늘리셨다면 먼저 삭제한 뒤 재이관해야 사진이 포함되어 등록됩니다.\n' +
+          '「확인」을 누르면 삭제 후 이어서 옮깁니다. (「취소」하면 그대로 진행합니다.)',
+      );
+      if (proceed) {
+        const ok = await deletePhotoDroppedForProduct(productNo, droppedNow);
+        if (!ok) {
+          setBusy(false);
+          return;
+        }
+      }
+    }
+
     // 실제 이관 — IMPORT_BATCH건씩 배치로 보내고, 실패 배치는 자동으로 이어서 재시도한다.
     // 한 번 누르면 끝날 때까지 진행하며(2026-09), 성공분은 배치마다 즉시 원장에 남아
     // 목록·삭제에서 복구된다. 재전송분은 서버가 내용 해시로 걸러 중복을 막는다(부분 멱등).
@@ -397,6 +462,8 @@ export default function Admin() {
     // 재시도로 풀리지 않는 오류로 끝난 배치 — 자동 이어하기에서 제외한다.
     const permanent = new Array<boolean>(batchCount).fill(false);
     const permanentCounts = new Array<number>(batchCount).fill(0);
+    // 배치별 사진 누락 건수 — 재시도 응답으로 교체(중복 계산 방지)한다.
+    const photoDroppedCounts = new Array<number>(batchCount).fill(0);
     let freeRemaining: number | null = quota?.paid
       ? null
       : Math.max(0, (quota?.limit ?? 20) - (quota?.used ?? 0));
@@ -423,6 +490,7 @@ export default function Admin() {
         written?: number;
         failed?: number;
         already?: number;
+        photoDropped?: number;
         permanentFailed?: number;
         freeRemaining?: number | null;
         paid?: boolean;
@@ -434,6 +502,7 @@ export default function Admin() {
       const failedCount = json.failed ?? 0;
       permanentCounts[idx] = json.permanentFailed ?? 0;
       if (failedCount > 0 && permanentCounts[idx] >= failedCount) permanent[idx] = true;
+      photoDroppedCounts[idx] = json.photoDropped ?? 0;
       if (json.freeRemaining !== undefined && json.freeRemaining !== null) {
         freeRemaining = json.freeRemaining;
         if (!json.paid) usedNow = (quota?.limit ?? 20) - freeRemaining;
@@ -495,6 +564,7 @@ export default function Admin() {
           written?: number;
           failed?: number;
           already?: number;
+          photoDropped?: number;
           permanentFailed?: number;
           freeRemaining?: number | null;
           paid?: boolean;
@@ -508,6 +578,7 @@ export default function Admin() {
         const retryFailed = json.failed ?? 0;
         permanentCounts[idx] = json.permanentFailed ?? 0;
         if (retryFailed > 0 && permanentCounts[idx] >= retryFailed) permanent[idx] = true;
+        photoDroppedCounts[idx] = json.photoDropped ?? 0;
         // 재시도 응답의 written/already는 이 배치의 최종 상태를 온전히 담는다(서버가
         // 원장을 기준으로 이미 등록된 건을 already로 돌려준다). 이전 시도의 부분 성공을
         // written에 더하면 이중 계산되므로, 응답값으로 교체한다.
@@ -525,6 +596,7 @@ export default function Admin() {
     const productName = products.find((p) => p.no === productNo)?.name ?? `상품 ${productNo}`;
     // 이전 실행에서 끝난 구간 — 이번 실행의 results엔 안 잡히므로 "미등록" 계산에 더한다.
     const resumedCount = Math.min(startResumeIdx * IMPORT_BATCH, reviews.length);
+    const totalPhotoDropped = photoDroppedCounts.reduce((s, n) => s + n, 0);
     const persistSummary = (over: Partial<LastRun> = {}) => {
       const resumed = resumedCount;
       const written = over.written ?? results.reduce((s, r) => s + (r?.written ?? 0), 0);
@@ -540,6 +612,7 @@ export default function Admin() {
         already,
         failed,
         notRegistered: Math.max(0, reviews.length - resumed - written - already),
+        photoDropped: over.photoDropped ?? totalPhotoDropped,
       });
     };
 
@@ -621,13 +694,13 @@ export default function Admin() {
         persistSummary();
         setResult({ quotaExceeded: true, used: usedNow });
         setQuota((q) => (q ? { ...q, used: q.limit } : q));
-        loadImports(1, filterProduct);
+        loadImports(1, filterProduct, filterPhotoDropped);
       } else if (totalFailed > 0 || resumeIdx < batchCount) {
         // 「정지」를 누르거나 영구 실패로 남은 건이 있다 — 여기까지 기록되고 다음
         // 「옮기기」가 이어서 진행한다(중복은 서버가 걸러낸다).
         persistSummary();
         saveProgress(rkey, resumeIdx * IMPORT_BATCH);
-        loadImports(1, filterProduct);
+        loadImports(1, filterProduct, filterPhotoDropped);
         setResult({
           stage: 'stopped',
           parsed: reviews.length,
@@ -635,6 +708,7 @@ export default function Admin() {
           failed: totalFailed,
           permanentFailed: totalPermanentFailed,
           already: totalAlready,
+          photoDropped: totalPhotoDropped,
           skipped: Math.max(0, reviews.length - resumedCount - totalWritten - totalAlready),
           freeRemaining,
           paid: quota?.paid,
@@ -658,6 +732,7 @@ export default function Admin() {
           failed: 0,
           permanentFailed: totalPermanentFailed,
           already: totalAlready,
+          photoDropped: totalPhotoDropped,
           skipped: Math.max(0, reviews.length - resumedCount - totalWritten - totalAlready),
           freeRemaining,
           paid: quota?.paid,
@@ -680,12 +755,15 @@ export default function Admin() {
         failed: results.reduce((s, r) => s + (r?.failed ?? 0), 0),
         permanentFailed: permanentCounts.reduce((s, n) => s + n, 0),
         already: results.reduce((s, r) => s + (r?.already ?? 0), 0),
+        photoDropped: photoDroppedCounts.reduce((s, n) => s + n, 0),
         skipped: reviews.length - results.reduce((s, r) => s + (r?.written ?? 0) + (r?.already ?? 0), 0),
         error: (e as Error).message,
       });
     } finally {
       setBusy(false);
       setImportProgress(null);
+      // 사진 누락 누계 갱신 — 안내 배너·필터용.
+      photoDroppedCount(filterProduct).then(setPhotoDroppedTotal);
       try {
         await wakeLockRef.current?.release();
       } catch {}
@@ -740,7 +818,7 @@ export default function Admin() {
         // 빈 목록이 보이지 않게, 삭제 후 총건수로 계산한 마지막 페이지로 조정한다.
         const remaining = Math.max(0, total - totalDeleted);
         const lastPage = Math.max(1, Math.ceil(remaining / PAGE_SIZE));
-        await loadImports(Math.min(page, lastPage), filterProduct);
+        await loadImports(Math.min(page, lastPage), filterProduct, filterPhotoDropped);
         setSelected(new Set());
       }
       // 목록 재조회(loadImports)가 메시지 상태를 먼저 지우므로, 완료 메시지는 그 뒤에 남긴다.
@@ -761,7 +839,9 @@ export default function Admin() {
   async function deleteAllFiltered() {
     if (
       !window.confirm(
-        '현재 필터(전체 상품 포함)의 모든 리뷰를 삭제할까요? 쇼핑몰 게시판에서도 함께 삭제됩니다.',
+        filterPhotoDropped
+          ? '사진 빠진 리뷰를 모두 삭제할까요? 쇼핑몰 게시판에서도 함께 삭제됩니다. 저장 공간을 늘린 뒤 같은 엑셀을 다시 올리면 사진이 포함되어 등록됩니다.'
+          : '현재 필터(전체 상품 포함)의 모든 리뷰를 삭제할까요? 쇼핑몰 게시판에서도 함께 삭제됩니다.',
       )
     )
       return;
@@ -782,7 +862,11 @@ export default function Admin() {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
           signal: AbortSignal.timeout(DELETE_FETCH_TIMEOUT_MS),
-          body: JSON.stringify({ all: true, product_no: filterProduct || undefined }),
+          body: JSON.stringify({
+            all: true,
+            product_no: filterProduct || undefined,
+            photo_dropped: filterPhotoDropped,
+          }),
         });
         const json = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(json.error ?? '삭제하지 못했습니다.');
@@ -793,7 +877,7 @@ export default function Admin() {
         setDeleteProgress({ deleted: totalDeleted, total: totalTarget, failed: totalFailed });
       }
       if (totalDeleted) {
-        await loadImports(1, filterProduct);
+        await loadImports(1, filterProduct, filterPhotoDropped);
         setSelected(new Set());
       }
       // 목록 재조회(loadImports)가 메시지 상태를 먼저 지우므로, 완료 메시지는 그 뒤에 남긴다.
@@ -804,6 +888,53 @@ export default function Admin() {
       );
     } catch (e) {
       setImportedError((e as Error).message);
+    } finally {
+      setDelBusy(false);
+      setDeleteProgress(null);
+    }
+  }
+
+  /** 사진 없이 등록된 리뷰만 골라 모두 삭제한다. 재이관 가드·「사진 빠진 리뷰만」 삭제에 쓴다. */
+  async function deletePhotoDroppedForProduct(productNo: number | '', totalHint: number): Promise<boolean> {
+    if (delBusy) return false;
+    setDelBusy(true);
+    setImportedMsg('');
+    setImportedError('');
+    setDeleteProgress({ deleted: 0, total: Math.max(1, totalHint), failed: 0 });
+    let totalDeleted = 0;
+    let totalFailed = 0;
+    let firstErr = '';
+    try {
+      let hasMore = true;
+      while (hasMore) {
+        const res = await fetch('/api/imports', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(DELETE_FETCH_TIMEOUT_MS),
+          body: JSON.stringify({
+            all: true,
+            product_no: productNo || undefined,
+            photo_dropped: true,
+          }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(json.error ?? '삭제하지 못했습니다.');
+        const deleted = (json.deleted ?? []).length;
+        totalDeleted += deleted;
+        totalFailed += (json.failed ?? []).length;
+        if (!firstErr && json.failed?.length) firstErr = json.failed[0].error ?? '';
+        hasMore = !!json.hasMore && deleted > 0;
+        setDeleteProgress({ deleted: totalDeleted, total: Math.max(1, totalHint), failed: totalFailed });
+      }
+      setImportedMsg(
+        totalFailed
+          ? `사진 빠진 리뷰 삭제 완료 ${totalDeleted}건 · 실패 ${totalFailed}건 (${firstErr})`
+          : `사진 빠진 리뷰 삭제 완료 ${totalDeleted}건`,
+      );
+      return true;
+    } catch (e) {
+      setImportedError((e as Error).message);
+      return false;
     } finally {
       setDelBusy(false);
       setDeleteProgress(null);
@@ -1070,9 +1201,13 @@ export default function Admin() {
                     {s.createdAt && <span className="text-neutral-400 dark:text-neutral-500"> {s.createdAt}</span>}
                     {' — '}{s.content}
                     {s.option && <span className="text-neutral-500 dark:text-neutral-400"> [옵션] {s.option}</span>}
-                    {s.imageUrl && (
+                    {(s.images ?? []).length > 0 && (
                       <span className="mt-1 block">
-                        <a href={s.imageUrl} target="_blank" rel="noreferrer" className="underline">첨부 이미지</a>
+                        {(s.images ?? []).map((u, j) => (
+                          <a key={j} href={u} target="_blank" rel="noreferrer" className="mr-2 underline">
+                            첨부 이미지{j + 1}
+                          </a>
+                        ))}
                       </span>
                     )}
                   </li>
@@ -1127,7 +1262,7 @@ export default function Admin() {
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold dark:text-neutral-100">리뷰이사가 옮긴 리뷰 관리</h2>
           <button
-            onClick={() => loadImports(page, filterProduct)}
+            onClick={() => loadImports(page, filterProduct, filterPhotoDropped)}
             className="rounded border px-3 py-1 text-xs hover:bg-neutral-50 dark:border-neutral-600 dark:text-neutral-300 dark:hover:bg-neutral-800"
           >
             새로고침
@@ -1137,6 +1272,8 @@ export default function Admin() {
           삭제하면 쇼핑몰 게시판에서도 함께 지워집니다. 목록은 {PAGE_SIZE}건씩 보여드립니다.
           새로 옮긴 리뷰는 바로 여기 나타납니다.
         </p>
+
+        <PhotoDroppedNotice count={photoDroppedTotal} />
 
         {lastRun && (
           <div className="mt-3 rounded border border-neutral-200 bg-neutral-50 p-3 text-xs dark:border-neutral-700 dark:bg-neutral-800">
@@ -1151,6 +1288,14 @@ export default function Admin() {
                   {' · '}
                   <span className="font-semibold text-amber-700 dark:text-amber-400">
                     {lastRun.notRegistered}건 미등록
+                  </span>
+                </>
+              ) : null}
+              {(lastRun.photoDropped ?? 0) > 0 ? (
+                <>
+                  {' · '}
+                  <span className="font-semibold text-amber-700 dark:text-amber-400">
+                    {lastRun.photoDropped}건 사진 빠짐
                   </span>
                 </>
               ) : null}
@@ -1175,7 +1320,7 @@ export default function Admin() {
             onChange={(e) => {
               const v = Number(e.target.value) || '';
               setFilterProduct(v);
-              loadImports(1, v);
+              loadImports(1, v, filterPhotoDropped);
             }}
           >
             <option value="">전체 상품</option>
@@ -1185,6 +1330,18 @@ export default function Admin() {
               </option>
             ))}
           </select>
+          <label className="flex items-center gap-1.5 text-xs text-neutral-600 dark:text-neutral-300">
+            <input
+              type="checkbox"
+              checked={filterPhotoDropped}
+              onChange={(e) => {
+                const v = e.target.checked;
+                setFilterPhotoDropped(v);
+                loadImports(1, filterProduct, v);
+              }}
+            />
+            사진 빠진 리뷰만{photoDroppedTotal > 0 ? ` (${photoDroppedTotal})` : ''}
+          </label>
           <button
             onClick={() =>
               deleteImports(
@@ -1203,7 +1360,7 @@ export default function Admin() {
             disabled={delBusy || total === 0}
             className="rounded border px-3 py-1.5 text-xs text-red-600 disabled:opacity-40 dark:border-neutral-600 dark:text-red-400"
           >
-            전체 삭제 ({total}건)
+            {filterPhotoDropped ? `사진 빠진 리뷰 삭제 (${total}건)` : `전체 삭제 (${total}건)`}
           </button>
           {delBusy && (
             <span className="text-xs text-neutral-500 dark:text-neutral-400">
@@ -1288,6 +1445,11 @@ export default function Admin() {
                         {confirmed ? `글번호 ${r.article_sno}` : '등록 확인 안 됨 (게시판 반영 전)'}
                         {r.created_date ? ` · 원 작성일 ${r.created_date}` : ''}
                         {' · '}옮긴 시각 {new Date(r.imported_at).toLocaleString('ko-KR')}
+                        {r.photo_dropped ? (
+                          <span className="ml-1 rounded bg-amber-100 px-1 text-[10px] font-medium text-amber-800 dark:bg-amber-900/50 dark:text-amber-300">
+                            사진 빠짐
+                          </span>
+                        ) : null}
                       </div>
                     </div>
                   </li>
@@ -1301,14 +1463,14 @@ export default function Admin() {
               </span>
               <span className="flex gap-1">
                 <button
-                  onClick={() => loadImports(page - 1, filterProduct)}
+                  onClick={() => loadImports(page - 1, filterProduct, filterPhotoDropped)}
                   disabled={page <= 1}
                   className="rounded border px-2 py-0.5 disabled:opacity-40 dark:border-neutral-600"
                 >
                   이전
                 </button>
                 <button
-                  onClick={() => loadImports(page + 1, filterProduct)}
+                  onClick={() => loadImports(page + 1, filterProduct, filterPhotoDropped)}
                   disabled={page >= totalPages}
                   className="rounded border px-2 py-0.5 disabled:opacity-40 dark:border-neutral-600"
                 >

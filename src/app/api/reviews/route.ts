@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
 
   if (dryRun) {
     const sample = reviews.slice(0, 3).map((r) => ({
-      writer: r.writer, content: r.content, score: r.score, createdAt: toDateTime(r.createdAt), option: r.option, imageUrl: r.imageUrl,
+      writer: r.writer, content: r.content, score: r.score, createdAt: toDateTime(r.createdAt), option: r.option, images: r.images,
     }));
     return NextResponse.json({ dryRun: true, count: reviews.length, sample });
   }
@@ -62,7 +62,7 @@ export async function POST(req: NextRequest) {
   }
 
   const toWrite = reviews.slice(0, quota.allowed);
-  const { written, permanentFailed, failMessage } = await writeReviews(
+  const { written, photoDropped, permanentFailed, failMessage } = await writeReviews(
     session.accessToken,
     session.mallNo,
     productNo,
@@ -81,6 +81,8 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     parsed: reviews.length,
     written,
+    // 저장 공간 부족으로 사진을 빼고 등록한 건수 — 고객 안내용.
+    photoDropped,
     // 재시도로 풀리지 않는 오류로 끝난 건수 — 클라이언트 안내용.
     permanentFailed,
     skipped: reviews.length - written,

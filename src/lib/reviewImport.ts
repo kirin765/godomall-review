@@ -7,7 +7,7 @@ export type ImportedReview = {
   createdAt: string | null;
   option: string | null;
   productName: string | null;
-  imageUrl: string | null;
+  images: string[];
 };
 
 /**
@@ -22,7 +22,7 @@ const PATTERNS: Record<keyof ImportedReview, RegExp> = {
   createdAt: /작성일|등록일|날짜|일시|date/i,
   option: /옵션|option/i,
   productName: /상품명|상품|product/i,
-  imageUrl: /이미지|사진|포토|영상|사진url|이미지url|리뷰사진|image|photo|video|url/i,
+  images: /이미지|사진|포토|영상|첨부|attachment|image|img|photo|video|review.*url|url.*image/i,
 };
 
 /**
@@ -35,15 +35,24 @@ function excludedFrom(key: keyof ImportedReview, header: string): boolean {
     return (
       // '내용' 계열이 상품명 컬럼을 잡지 않게, '리뷰사진'·'포토/영상'이 content 패턴(리뷰)을 먼저 잡지 않게
       /상품명/.test(header) ||
-      PATTERNS.imageUrl.test(header) ||
+      PATTERNS.images.test(header) ||
       // '리뷰구분'·'글번호'·'도움수'·'일시'류 메타 컬럼이 본문 컬럼보다 앞에 있는데 걸리지 않게
       /구분|글번호|번호|도움수|답글|전시|혜택|유저정보|이동일|풀필먼트/.test(header)
     );
   if (key === 'option') return /id/i.test(header); // 쿠팡의 노출상품ID(옵션ID)가 옵션으로 오인되지 않게
-  if (key === 'imageUrl') return /상품명|노출상품|옵션/.test(header); // 상품 URL·옵션ID 컬럼이 이미지 컬럼으로 오인되지 않게
+  if (key === 'images') return /상품명|노출상품|옵션/.test(header); // 상품 URL·옵션ID 컬럼이 이미지 컬럼으로 오인되지 않게
   if (key === 'writer') return /평점|별점|점수|rating/.test(header); // '구매자평점'이 작성자로 잡히지 않게
   if (key === 'productName') return /번호|id/i.test(header); // '상품번호'·'노출상품ID'가 상품명으로 잡히지 않게
   return false;
+}
+
+/** 셀에서 이미지 URL(최대 5개)을 뽑는다. 이미지 확장자로 끝나는 http(s) 주소만 허용한다. */
+export function extractImageUrls(cell: string): string[] {
+  const parts = cell.split(/[\s,;]+/);
+  const urls = parts.filter((p) =>
+    /^https?:\/\/.+\.(jpe?g|png|gif|webp|bmp)(\?.*)?$/i.test(p),
+  );
+  return urls.slice(0, 5);
 }
 
 function pickColumns(headers: string[]) {
@@ -78,7 +87,7 @@ export function parseReviewFile(buf: ArrayBuffer): { reviews: ImportedReview[]; 
       createdAt: cell(r, col.createdAt) || null,
       option: cell(r, col.option) || null,
       productName: cell(r, col.productName) || null,
-      imageUrl: cell(r, col.imageUrl) || null,
+      images: extractImageUrls(cell(r, col.images)),
     });
   }
   return { reviews, headers };

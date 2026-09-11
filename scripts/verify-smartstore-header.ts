@@ -36,8 +36,8 @@ log(r1.writer === 'kiri****', `작성자가 '작성자' 컬럼 (구매자평점 
 log(r2.writer === 'hane****', `마스킹: haneul77 → hane**** (앞 4자 + ****) → ${r2.writer}`);
 log(r1.score === 5, `평점 5 (구매자평점) → ${r1.score}`);
 log(r1.productName === '여름 원피스', `상품명이 '상품명' 컬럼 (상품번호 X) → ${r1.productName}`);
-log(r1.imageUrl === 'http://img1.test.com/a.jpg', `이미지가 '포토/영상' 컬럼 → ${r1.imageUrl}`);
-log(r2.imageUrl === null, `빈 '포토/영상'은 이미지 없음 → ${r2.imageUrl}`);
+log(r1.images.length === 1 && r1.images[0] === 'http://img1.test.com/a.jpg', `이미지가 '포토/영상' 컬럼 → ${r1.images.join(',')}`);
+log(r2.images.length === 0, `빈 '포토/영상'은 이미지 없음 → ${r2.images.length}`);
 log(r3.productName === '가죽 벨트', `2번째 상품 상품명 → ${r3.productName}`);
 log((toDateTime(r1.createdAt) ?? '').startsWith('2026-06-14'), `등록일 파싱 → ${r1.createdAt}`);
 
