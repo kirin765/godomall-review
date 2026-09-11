@@ -159,14 +159,14 @@ export async function getEntitlement(mallNo: number, accessToken?: string | null
   if (!db) {
     // DB 없음 → workspace 직접 조회(캐시 없음). ACTIVE면 plus(구독 기록이 없으므로 workspace 기준).
     if (fetch && accessToken) {
-      const { fetchAppStatus } = await import('@/lib/payment');
+      const { fetchAppStatus, parseWorkspaceDate } = await import('@/lib/payment');
       const st = await fetchAppStatus(accessToken);
       const paid = st.kind === 'ACTIVE';
       return {
         paid,
         mode: paid ? 'plus' : 'free',
         status: st.kind,
-        expireAt: st.kind === 'ACTIVE' ? st.expireDateTime ?? null : null,
+        expireAt: paid ? (parseWorkspaceDate(st.expireDateTime)?.toISOString() ?? null) : null,
         checkedAt: Date.now(),
       };
     }
@@ -184,17 +184,25 @@ export async function getEntitlement(mallNo: number, accessToken?: string | null
     const fresh = ent && Date.now() - new Date(ent.checked_at).getTime() < STATUS_TTL_MS;
 
     if (fetch && accessToken && !fresh) {
-      const { fetchAppStatus } = await import('@/lib/payment');
+      const { fetchAppStatus, parseWorkspaceDate } = await import('@/lib/payment');
       const st = await fetchAppStatus(accessToken);
       status = st.kind;
-      const exp = st.kind === 'ACTIVE' || st.kind === 'EXPIRED' ? new Date(st.expireDateTime ?? '') : null;
-      expireTs = exp && !Number.isNaN(exp.getTime()) ? exp : null;
-      if (status !== 'UNKNOWN') {
-        await db`insert into app_entitlement (mall_id, app_status, expire_ts, checked_at)
-                 values (${String(mallNo)}, ${status}, ${expireTs}, now())
-                 on conflict (mall_id) do update
-                   set app_status = excluded.app_status, expire_ts = excluded.expire_ts, checked_at = now()`;
+      const exp = st.kind === 'ACTIVE' || st.kind === 'EXPIRED' ? parseWorkspaceDate(st.expireDateTime) : null;
+      expireTs = exp;
+      // UNKNOWN은 정상 상태일 수도 있다(판매앱 전환 전 몰의 401/404). 직전 캐시도 UNKNOWN이면
+      // 반복 경고를 생략해 실제 장애 신호가 묻히지 않게 한다(cafe24-review 3708400 교훈의 절충).
+      if (st.kind === 'UNKNOWN' && ent?.app_status !== 'UNKNOWN') {
+        console.warn('entitlement: workspace status 조회 실패 — paid 판정이 구독 원장에만 의존', {
+          mallNo: String(mallNo),
+          reason: st.reason ?? 'unknown',
+        });
       }
+      // UNKNOWN도 5분 TTL 캐시에 남겨 같은 몰의 반복 조회·반복 로그를 막는다.
+      // 판정은 아래 hasActiveSub가 좌우하므로 UNKNOWN을 캐시해도 결과는 동일하다.
+      await db`insert into app_entitlement (mall_id, app_status, expire_ts, checked_at)
+               values (${String(mallNo)}, ${status}, ${expireTs}, now())
+               on conflict (mall_id) do update
+                 set app_status = excluded.app_status, expire_ts = excluded.expire_ts, checked_at = now()`;
     } else if (ent) {
       status = (ent.app_status as AppStatusKind) || 'UNKNOWN';
       expireTs = ent.expire_ts;
@@ -219,7 +227,12 @@ export async function getEntitlement(mallNo: number, accessToken?: string | null
         : expireTs?.toISOString() ?? null,
       checkedAt: Date.now(),
     };
-  } catch {
+  } catch (e) {
+    // DB·조회 장애를 조용히 FREE로 삼키면 유료 고객이 402로 차단돼도 원인 추적이 안 된다.
+    console.error('entitlement: 판정 중 오류 — 무료 폴백(유료 고객이면 402로 보임)', {
+      mallNo: String(mallNo),
+      error: (e as Error).message.slice(0, 200),
+    });
     return { ...FREE, status: 'UNKNOWN', expireAt: null, checkedAt: Date.now() };
   } finally {
     await db.end();

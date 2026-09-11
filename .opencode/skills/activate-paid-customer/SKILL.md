@@ -42,7 +42,7 @@ curl -sS -X POST 'https://cafe24-review-gamma.vercel.app/api/payment/extend' \
 - `ok: true` → 활성화 완료. `expireAt`(만료일시)을 사용자에게 알려준다.
 - `ok: false` / 401 → 인증 실패. `GODO_PAYMENT_SECRET`이 맞는지 확인.
 - 400 (`mallNo and token required`) → 토큰이 없다. 해당 몰이 앱을 한 번도 실행하지 않은 상태. 사용자에게 "몰이 앱을 먼저 한 번 실행해야 한다"고 안내.
-- 502 (extend 실패) → 워크스페이스 연장 실패. error 메시지를 보여주고 사용자에게 문의.
+- 502 (extend 실패) → 워크스페이스 연장 실패 또는 **구독 기록 실패**. error 메시지를 보여주고 사용자에게 문의. `구독 기록 실패`면 워크스페이스는 연장됐지만 DB 기록이 안 된 상태라 재시도해도 안전하다(만료일이 몇 초 앞당겨질 수 있음).
 
 ## 주의
 

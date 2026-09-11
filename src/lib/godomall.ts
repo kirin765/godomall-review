@@ -86,9 +86,14 @@ export async function getMallProfile(token: string): Promise<MallProfile> {
 
 export type Goods = { sno: number; name: string };
 
-export async function listGoods(token: string, page = 1, pageSize = 1000): Promise<{ totalCount: number; contents: Goods[] }> {
+export async function listGoods(
+  token: string,
+  page = 1,
+  pageSize = 1000,
+  opts: { signal?: AbortSignal } = {},
+): Promise<{ totalCount: number; contents: Goods[] }> {
   const q = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
-  const res = await fetch(`${API_BASE}/goods?${q}`, { headers: authHeaders(token) });
+  const res = await fetch(`${API_BASE}/goods?${q}`, { headers: authHeaders(token), signal: opts.signal });
   if (!res.ok) throw new Error(`goods ${res.status}: ${await res.text()}`);
   return res.json();
 }

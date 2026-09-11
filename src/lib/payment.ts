@@ -122,9 +122,16 @@ export const PAYMENT_INFO = {
 
 export type PaymentInfo = typeof PAYMENT_INFO;
 
-/** "yyyy-MM-dd HH:mm:ss" → Date */
+/**
+ * workspace 날짜를 런타임·형식에 무관하게 파싱한다. workspace는 두 형식이 확인됐다
+ * (스펙 응답 예시 "2026-09-17 10:36:32" 공백형 / 스키마 주석 "…T10:36:32.377493507" T+나노초형).
+ * ISO(T)는 네이티브로(오프셋·나노초 정확), 공백형은 수동으로 로컬 타임 파싱한다.
+ * cafe24-review 75450f6·3708400과 같은 부류 — 만료일을 부정확히 다루면 판정·표시가 조용히 어긋난다.
+ */
 export function parseWorkspaceDate(s?: string): Date | null {
   if (!s) return null;
+  const native = new Date(s);
+  if (!Number.isNaN(native.getTime())) return native;
   const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(s);
   if (!m) return null;
   const [, y, mo, d, hh, mi, ss] = m.map(Number);
