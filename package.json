@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "test": "node --test scripts/tests/transfer.test.cjs",
+    "test:db": "node scripts/tests/run-database.cjs"
   },
   "dependencies": {
     "next": "16.2.12",

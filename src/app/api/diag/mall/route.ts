@@ -1,5 +1,6 @@
+import postgres from 'postgres';
 import { NextRequest, NextResponse } from 'next/server';
-import { getToken, recordSubscription, markEntitlement, clearEntitlement } from '@/lib/entitlement';
+import { getToken, recordSubscription, markEntitlement } from '@/lib/entitlement';
 import { fetchAppStatus, extendAppStatus, expiryAfterMonths, PAID_MONTHS, PAID_PRICE } from '@/lib/payment';
 
 export const runtime = 'nodejs';
@@ -18,8 +19,8 @@ export async function GET(req: NextRequest) {
   const info = { mallNo, tokenPresent: !!token, db: !!process.env.DATABASE_URL };
 
   if (action === 'tokens') {
-    const db = process.env.DATABASE_URL ? require('postgres') : null;
-    const sql = db(process.env.DATABASE_URL, { max: 1 });
+    if (!process.env.DATABASE_URL) return NextResponse.json({ error: 'database unavailable' }, { status: 503 });
+    const sql = postgres(process.env.DATABASE_URL, { max: 1 });
     const rows = await sql`select mall_id, updated_at from app_tokens order by updated_at desc limit 50`.catch((e: Error) => [{ error: e.message.slice(0, 200) }]);
     await sql.end().catch(() => {});
     return NextResponse.json({ action, rows });
@@ -36,8 +37,8 @@ export async function GET(req: NextRequest) {
   }
 
   if (action === 'subs') {
-    const db = process.env.DATABASE_URL ? require('postgres') : null;
-    const sql = db(process.env.DATABASE_URL, { max: 1 });
+    if (!process.env.DATABASE_URL) return NextResponse.json({ error: 'database unavailable' }, { status: 503 });
+    const sql = postgres(process.env.DATABASE_URL, { max: 1 });
     const rows = await sql`select mall_id, order_no, payment_type, price, until_ts from app_subscriptions where mall_id = ${String(mallNo)} order by until_ts desc`.catch((e: Error) => [{ error: e.message.slice(0, 200) }]);
     await sql.end().catch(() => {});
     return NextResponse.json({ action, rows });
@@ -45,8 +46,8 @@ export async function GET(req: NextRequest) {
 
   if (action === 'del-sub') {
     const orderNo = req.nextUrl.searchParams.get('orderNo') || '';
-    const db = process.env.DATABASE_URL ? require('postgres') : null;
-    const sql = db(process.env.DATABASE_URL, { max: 1 });
+    if (!process.env.DATABASE_URL) return NextResponse.json({ error: 'database unavailable' }, { status: 503 });
+    const sql = postgres(process.env.DATABASE_URL, { max: 1 });
     const rows = await sql`delete from app_subscriptions where mall_id = ${String(mallNo)} and order_no = ${orderNo} returning order_no`.catch((e: Error) => [{ error: e.message.slice(0, 200) }]);
     await sql.end().catch(() => {});
     return NextResponse.json({ action, rows });

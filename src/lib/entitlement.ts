@@ -22,13 +22,21 @@ export type Entitlement = {
   checkedAt: number;
 };
 
+let shared: postgres.Sql | null = null;
+let schema: Promise<void> | null = null;
+
 function sql(): postgres.Sql<Record<string, unknown>> | null {
   const url = process.env.DATABASE_URL;
   if (!url) return null;
-  return postgres(url, { max: 1 });
+  return shared ??= postgres(url, { max: 1, idle_timeout: 20, connect_timeout: 5, connection: { statement_timeout: 5000 } });
 }
 
 async function ensureTables(db: postgres.Sql<Record<string, unknown>>) {
+  schema ??= initializeTables(db).catch(error => { schema = null; throw error; });
+  return schema;
+}
+
+async function initializeTables(db: postgres.Sql<Record<string, unknown>>) {
   // ⚠️ postgres.js는 prepared statement로 보내서 ';'로 이어진 다중 문장이 거부된다
   // (cannot insert multiple commands into a prepared statement). 문장마다 나눠 보낸다.
   await db`
@@ -65,8 +73,6 @@ export async function saveToken(mallNo: number, accessToken: string): Promise<vo
              on conflict (mall_id) do update set access_token = excluded.access_token, updated_at = now()`;
   } catch {
     /* DB 장애는 무료 폴백 경로라 침묵 */
-  } finally {
-    await db.end();
   }
 }
 
@@ -78,8 +84,6 @@ export async function getToken(mallNo: number): Promise<string | null> {
     return rows[0]?.access_token ?? null;
   } catch {
     return null;
-  } finally {
-    await db.end();
   }
 }
 
@@ -92,8 +96,6 @@ export async function deleteToken(mallNo: number): Promise<void> {
     await db`delete from app_tokens where mall_id = ${String(mallNo)}`;
   } catch {
     /* noop */
-  } finally {
-    await db.end();
   }
 }
 
@@ -114,8 +116,6 @@ export async function recordSubscription(opts: {
     return true;
   } catch {
     return false;
-  } finally {
-    await db.end();
   }
 }
 
@@ -127,8 +127,6 @@ export async function clearEntitlement(mallNo: number): Promise<void> {
     await db`delete from app_entitlement where mall_id = ${String(mallNo)}`;
   } catch {
     /* noop */
-  } finally {
-    await db.end();
   }
 }
 
@@ -144,8 +142,6 @@ export async function markEntitlement(mallNo: number, status: string, expireTs: 
                set app_status = excluded.app_status, expire_ts = excluded.expire_ts, checked_at = now()`;
   } catch {
     /* noop */
-  } finally {
-    await db.end();
   }
 }
 
@@ -228,13 +224,7 @@ export async function getEntitlement(mallNo: number, accessToken?: string | null
       checkedAt: Date.now(),
     };
   } catch (e) {
-    // DB·조회 장애를 조용히 FREE로 삼키면 유료 고객이 402로 차단돼도 원인 추적이 안 된다.
-    console.error('entitlement: 판정 중 오류 — 무료 폴백(유료 고객이면 402로 보임)', {
-      mallNo: String(mallNo),
-      error: (e as Error).message.slice(0, 200),
-    });
-    return { ...FREE, status: 'UNKNOWN', expireAt: null, checkedAt: Date.now() };
-  } finally {
-    await db.end();
+    console.error('entitlement: status lookup failed', { mallNo: String(mallNo), error: (e as Error).message.slice(0, 200) });
+    throw new Error('이용권 상태를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.');
   }
 }

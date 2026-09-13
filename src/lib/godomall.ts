@@ -114,13 +114,14 @@ export type ExternalReview = {
 };
 
 /** 외부 상품 리뷰 일괄 등록(최대 100개). godomall이 공식 제공하는 리뷰 이전 엔드포인트. */
-export async function importReviews(token: string, reviews: ExternalReview[]): Promise<{ success: number; fail: number; failMessage: string[] }> {
+export async function importReviews(token: string, reviews: ExternalReview[], opts: { signal?: AbortSignal } = {}): Promise<{ success: number; fail: number; failMessage: string[] }> {
   const res = await fetch(`${API_BASE}/boards/external/goodsreviews/articles/bulk`, {
     method: 'POST',
     headers: authHeaders(token),
     body: JSON.stringify({ reviews }),
+    signal: opts.signal,
   });
-  if (!res.ok) throw new Error(`bulk ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw Object.assign(new Error(`bulk ${res.status}: ${await res.text()}`), { status: res.status });
   return res.json();
 }
 
@@ -142,14 +143,14 @@ export type GoodsReviewArticle = {
  */
 export async function listGoodsReviewArticles(
   token: string,
-  opts: { registerStartDate?: string; registerEndDate?: string; page?: number; pageSize?: number } = {},
+  opts: { registerStartDate?: string; registerEndDate?: string; page?: number; pageSize?: number; signal?: AbortSignal } = {},
 ): Promise<{ totalCount: number; contents: GoodsReviewArticle[] }> {
   const q = new URLSearchParams();
   if (opts.registerStartDate) q.set('registerStartDate', opts.registerStartDate);
   if (opts.registerEndDate) q.set('registerEndDate', opts.registerEndDate);
   if (opts.page) q.set('page', String(opts.page));
   if (opts.pageSize) q.set('pageSize', String(opts.pageSize));
-  const res = await fetch(`${API_BASE}/boards/goodsreview/articles?${q}`, { headers: authHeaders(token) });
+  const res = await fetch(`${API_BASE}/boards/goodsreview/articles?${q}`, { headers: authHeaders(token), signal: opts.signal });
   if (!res.ok) throw new Error(`goodsreview articles ${res.status}: ${await res.text()}`);
   return res.json();
 }

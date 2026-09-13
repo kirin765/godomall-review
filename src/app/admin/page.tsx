@@ -1,7 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { parseReviewFile, type ImportedReview as ParsedReview } from '@/lib/reviewImport';
+import { prepareReviewFile } from '@/lib/reviewFileClient';
+import type { PreparedReviewFile } from '@/lib/reviewWorkerTask';
+import { IMPORT_BATCH, transferReviews } from '@/lib/transferClient';
 
 type Product = { no: number; name: string };
 type Quota = { used: number; limit: number; paid: boolean };
@@ -61,7 +63,7 @@ type Result = {
 };
 
 /**
- * 마지막 이관 요약 — 원장은 성공분만 담으므로 "아직 등록되지 않은 리뷰"가 몇 건인지는
+ * 마지막 이관 요약 — 원장은 성공분만 담으므로 "등록을 완료하지 못한 리뷰"가 몇 건인지는
  * 파일(파싱 결과)과 대조해야만 알 수 있다. 브라우저(localStorage)에 남겨 보여준다.
  */
 type LastRun = {
@@ -101,15 +103,11 @@ const PAGE_SIZE = 50;
 // 50건 = 1회 호출로 끝나 Hobby 60초에 넉넉하다. 배치가 작을수록 요청이 끊겼을 때
 // 중복될 수 있는 창도 작아진다. 서버가 내용 해시로 "게시판에 확인된" 중복을 걸러내므로
 // (부분 멱등) 재전송돼도 확인된 글은 중복 등록되지 않는다.
-const IMPORT_BATCH = 50;
 // 배치 요청 클라이언트 타임아웃. 서버 함수가 60초 제한에 죽거나 응답이 늦어도
 // 화면이 무한 대기하지 않게 넉넉히 끊는다(끊겨도 재개 지점이 남고, 재전송은 서버가 걸러낸다).
-const BATCH_FETCH_TIMEOUT_MS = 70000;
 // 성공 배치를 다시 보내기 전 배치 사이 잠깐 쉰다 — 서버 예산·회복 시간을 존중한다.
-const RETRY_PAUSE_MS = 5000;
 // 진행 없이 실패가 이어질 때 물러나 기다리는 시간(30→60→120초에서 머문다).
 // 일시적 오류·점검으로 막혀도 회복되는 대로 바로 이어간다. 사용자는 「정지」로 멈춘다.
-const BACKOFF_STEPS_MS = [30000, 60000, 120000];
 // 삭제 요청 클라이언트 타임아웃. 서버가 함수 예산(45초) 안에서 반드시 응답하므로
 // 여유를 두고 끊는다 — "삭제하는 중…"에 갇히지 않게.
 const DELETE_FETCH_TIMEOUT_MS = 70000;
@@ -124,13 +122,6 @@ const lastRunKey = (mall: string) => `godo-lastrun:${mall}`;
  * 백오프 대기 — ms 동안 기다리면서 1초마다 남은 시간을 onTick으로 알린다.
  * checkStop()이 참을 내면 일찍 끝난다(정지·한도 소진 등).
  */
-async function backoffWait(ms: number, checkStop: () => boolean, onTick: (sec: number) => void) {
-  const until = Date.now() + ms;
-  while (until > Date.now() && !checkStop()) {
-    onTick(Math.ceil((until - Date.now()) / 1000));
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-}
 
 function fmtDate(iso: string | null | undefined): string {
   if (!iso) return '';
@@ -260,7 +251,7 @@ export default function Admin() {
   const [deleteProgress, setDeleteProgress] = useState<{ deleted: number; total: number; failed: number } | null>(null);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [parsed, setParsed] = useState<ParsedReview[] | null>(null);
+  const [parsed, setParsed] = useState<PreparedReviewFile | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [showNotice, setShowNotice] = useState(false);
   // 이관 중 「정지」를 눌렀음을 기록한다 — run(진행 루프)이 이를 보고 깨끗하게 멈춘다.
@@ -270,7 +261,7 @@ export default function Admin() {
 
   useEffect(() => {
     fetch('/api/goods')
-      .then((r) => r.json())
+      .then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error ?? '몰 정보를 불러오지 못했습니다.'); return data; })
       .then((d: GoodsPayload) => {
         if (d.mallNo) setMallName(`몰 #${d.mallNo}`);
         if (d.quota) setQuota(d.quota);
@@ -278,7 +269,7 @@ export default function Admin() {
         if (d.goodsError) setGoodsError(d.goodsError);
         if (Array.isArray(d.products)) setProducts(d.products);
       })
-      .catch(() => {})
+      .catch(error => setGoodsError((error as Error).message))
       .finally(() => setLoading(false));
   }, []);
 
@@ -355,12 +346,19 @@ export default function Admin() {
 
   /** localStorage에 이어올 지점을 남긴다. 같은 파일·상품이면 중단 지점부터 계속한다. */
   const resumeKey = useCallback(
-    (productNo: number | '', f: File | null) => {
-      if (!f) return '';
-      return `godo-import:${mallName}:${productNo}:${f.name}:${f.size}:${f.lastModified}`;
-    },
+    (productNo: number, fileHash: string) => `godo-import-v3:${mallName}:${productNo}:${fileHash}`,
     [mallName],
   );
+  const clearResume = () => {
+    try {
+      const keys: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key?.startsWith(`godo-import-v3:${mallName}:`)) keys.push(key);
+      }
+      keys.forEach(key => localStorage.removeItem(key));
+    } catch {}
+  };
   const readResume = (key: string) => {
     try {
       const n = Number(localStorage.getItem(key) ?? 0);
@@ -383,22 +381,13 @@ export default function Admin() {
     setBusy(true);
     setParsing(!parsed);
     setResult(null);
-    // 이관이 수십 분 걸릴 수도 있으므로 화면이 잠자지 않게 Wake Lock을 잡는다.
     stopRef.current = false;
-    try {
-      wakeLockRef.current = 'wakeLock' in navigator ? await navigator.wakeLock.request('screen') : null;
-    } catch {}
 
-    let reviews = parsed;
-    if (!reviews) {
+    let prepared = parsed;
+    if (!prepared) {
       try {
-        // 파싱은 동기라 큰 엑셀은 몇 초 걸린다. 그 사이 화면이 멈춘 것처럼 보이지 않게
-        // 먼저 "읽는 중" 상태를 그려주고, 이벤트 루프에 양보한 뒤 파싱한다.
-        await new Promise((r) => setTimeout(r, 0));
-        const buf = await file.arrayBuffer();
-        const r = parseReviewFile(buf);
-        reviews = r.reviews;
-        setParsed(reviews);
+        prepared = await prepareReviewFile(file);
+        setParsed(prepared);
       } catch (e) {
         setResult({ stage: 'parse', error: (e as Error).message });
         setBusy(false);
@@ -407,7 +396,8 @@ export default function Admin() {
       }
     }
     setParsing(false);
-    if (!reviews) return;
+    if (!prepared) return;
+    const reviews = prepared.reviews;
 
     if (dry) {
       const allowed = quota?.paid
@@ -424,349 +414,49 @@ export default function Admin() {
       return;
     }
 
-    // 사진 빠진 리뷰 재이관 가드 — 저장 공간을 늘리지 않고 다시 옮기면 같은 리뷰가
-    // 중복 등록될 수 있다. 남아 있으면 먼저 지울지 확인하고, 동의하면 지운 뒤 이어간다.
-    const droppedNow = await photoDroppedCount(productNo);
-    if (droppedNow > 0) {
-      const proceed = window.confirm(
-        `사진 없이 등록된 리뷰가 ${droppedNow}건 있습니다.\n` +
-          '저장 공간을 늘리셨다면 먼저 삭제한 뒤 재이관해야 사진이 포함되어 등록됩니다.\n' +
-          '「확인」을 누르면 삭제 후 이어서 옮깁니다. (「취소」하면 그대로 진행합니다.)',
-      );
-      if (proceed) {
-        const ok = await deletePhotoDroppedForProduct(productNo, droppedNow);
-        if (!ok) {
-          setBusy(false);
-          return;
-        }
-      }
-    }
-
-    // 실제 이관 — IMPORT_BATCH건씩 배치로 보내고, 실패 배치는 자동으로 이어서 재시도한다.
-    // 한 번 누르면 끝날 때까지 진행하며(2026-09), 성공분은 배치마다 즉시 원장에 남아
-    // 목록·삭제에서 복구된다. 재전송분은 서버가 내용 해시로 걸러 중복을 막는다(부분 멱등).
-    const rkey = resumeKey(productNo, file);
-    const batchCount = Math.ceil(reviews.length / IMPORT_BATCH);
-    let resumeIdx = Math.floor(readResume(rkey) / IMPORT_BATCH);
-    if (resumeIdx >= batchCount) resumeIdx = 0;
-    // 이전 실행에서 완료된 구간(이번 실행에서 dispatch되지 않아 results에 안 잡힌다).
-    // 요약의 "미등록" 계산에 이 값을 더해야 이어하기 때도 정확하다.
-    const startResumeIdx = resumeIdx;
-    const resuming = resumeIdx > 0;
-    let attempted = resumeIdx * IMPORT_BATCH;
-    let quotaExhausted = false;
-    let usedNow = quota?.used ?? 0;
-    const done = new Array<boolean>(batchCount).fill(false);
-    const results: ({ written: number; failed: number; already: number } | null)[] =
-      new Array(batchCount).fill(null);
-    // 재시도로 풀리지 않는 오류로 끝난 배치 — 자동 이어하기에서 제외한다.
-    const permanent = new Array<boolean>(batchCount).fill(false);
-    const permanentCounts = new Array<number>(batchCount).fill(0);
-    // 배치별 사진 누락 건수 — 재시도 응답으로 교체(중복 계산 방지)한다.
-    const photoDroppedCounts = new Array<number>(batchCount).fill(0);
-    let freeRemaining: number | null = quota?.paid
-      ? null
-      : Math.max(0, (quota?.limit ?? 20) - (quota?.used ?? 0));
-    setImportProgress({ written: attempted, total: reviews.length, failed: 0, resuming, retrying: null });
-
-    const saveProgressAndState = () => {
-      saveProgress(rkey, Math.min(resumeIdx * IMPORT_BATCH, reviews.length));
-      setImportProgress({
-        written: Math.max(attempted, resumeIdx * IMPORT_BATCH),
-        total: reviews.length,
-        failed: results.reduce((s, r) => s + (r?.failed ?? 0), 0),
-        resuming,
-        retrying: null,
-      });
-    };
-    const sliceLen = (idx: number) => Math.min(IMPORT_BATCH, reviews.length - idx * IMPORT_BATCH);
-    const bumpAttempted = (idx: number) => {
-      if (results[idx] === null) attempted += sliceLen(idx);
-    };
-
-    const onBatchDone = (
-      idx: number,
-      json: {
-        written?: number;
-        failed?: number;
-        already?: number;
-        photoDropped?: number;
-        permanentFailed?: number;
-        freeRemaining?: number | null;
-        paid?: boolean;
-        quotaExhausted?: boolean;
-      },
-    ) => {
-      bumpAttempted(idx);
-      // 실패가 전부 재시도 불가(영구)일 때만 이 배치의 자동 재시도를 멈춘다.
-      const failedCount = json.failed ?? 0;
-      permanentCounts[idx] = json.permanentFailed ?? 0;
-      if (failedCount > 0 && permanentCounts[idx] >= failedCount) permanent[idx] = true;
-      photoDroppedCounts[idx] = json.photoDropped ?? 0;
-      if (json.freeRemaining !== undefined && json.freeRemaining !== null) {
-        freeRemaining = json.freeRemaining;
-        if (!json.paid) usedNow = (quota?.limit ?? 20) - freeRemaining;
-      }
-      if (json.quotaExhausted) {
-        // 무료 한도가 배치 도중 소진 — 이 배치의 나머지는 아직 안 옮겨졌다. 완료 구간에
-        // 넣지 않고 중단해, 유료 전환 후 이 배치부터 이어서 하게 둔다.
-        quotaExhausted = true;
-        saveProgress(rkey, resumeIdx * IMPORT_BATCH);
-        setResult({ quotaExceeded: true, used: usedNow });
-        setQuota((q) => (q ? { ...q, used: q.limit } : q));
-        return;
-      }
-      results[idx] = { written: json.written ?? 0, failed: json.failed ?? 0, already: json.already ?? 0 };
-      done[idx] = true;
-      // 완료된 연속 구간만큼 재개 지점을 전진시킨다.
-      while (resumeIdx < batchCount && done[resumeIdx]) resumeIdx++;
-      saveProgressAndState();
-    };
-
-    /** 한 배치를 보낸다. 'ok'/'quota'/'err' 셋 중 하나로 돌아온다. */
-    const sendOne = async (idx: number) => {
-      const slice = reviews.slice(idx * IMPORT_BATCH, (idx + 1) * IMPORT_BATCH);
-      try {
-        const res = await fetch('/api/reviews/batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          // 서버 함수가 60초 제한에 죽거나 응답이 없어도 연결을 끊어 화면이 갇히지 않게 한다.
-          signal: AbortSignal.timeout(BATCH_FETCH_TIMEOUT_MS),
-          body: JSON.stringify({ product_no: productNo, source, reviews: slice }),
-        });
-        const json = await res.json().catch(() => ({}));
-        if (res.status === 402) return { kind: 'quota' as const, json };
-        if (!res.ok) return { kind: 'err' as const, msg: String(json.error ?? '옮기는 중 문제가 생겼습니다.') };
-        // 200인데 아무 카운트도 없으면 본문 파싱 실패·서버 오류다. 이걸 "완료"로 세면 진행
-        // 지점이 그 배치를 건너뛰어 유실되므로 에러로 본다(재시도·재개 대상).
-        if (!json.written && !json.failed && !json.already)
-          return {
-            kind: 'err' as const,
-            msg: '응답을 받지 못했습니다. 다시 「옮기기」를 눌러 이어서 진행해 주세요.',
-          };
-        return { kind: 'ok' as const, json };
-      } catch (e) {
-        return { kind: 'err' as const, msg: (e as Error).message };
-      }
-    };
-
-    /** 실패한 배치를 자동 이어하기에서 다시 보낸다. 결과는 최종값으로 교체한다. */
-    const sendRetry = async (idx: number): Promise<boolean> => {
-      const slice = reviews.slice(idx * IMPORT_BATCH, (idx + 1) * IMPORT_BATCH);
-      try {
-        const res = await fetch('/api/reviews/batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(BATCH_FETCH_TIMEOUT_MS),
-          body: JSON.stringify({ product_no: productNo, source, reviews: slice }),
-        });
-        const json = (await res.json().catch(() => ({}))) as {
-          written?: number;
-          failed?: number;
-          already?: number;
-          photoDropped?: number;
-          permanentFailed?: number;
-          freeRemaining?: number | null;
-          paid?: boolean;
-          quotaExhausted?: boolean;
-        };
-        if (res.status === 402 || json.quotaExhausted) {
-          quotaExhausted = true;
-          return false;
-        }
-        if (!res.ok) return false; // 재시도도 실패 — 그대로 둔다
-        const retryFailed = json.failed ?? 0;
-        permanentCounts[idx] = json.permanentFailed ?? 0;
-        if (retryFailed > 0 && permanentCounts[idx] >= retryFailed) permanent[idx] = true;
-        photoDroppedCounts[idx] = json.photoDropped ?? 0;
-        // 재시도 응답의 written/already는 이 배치의 최종 상태를 온전히 담는다(서버가
-        // 원장을 기준으로 이미 등록된 건을 already로 돌려준다). 이전 시도의 부분 성공을
-        // written에 더하면 이중 계산되므로, 응답값으로 교체한다.
-        results[idx] = { written: json.written ?? 0, failed: json.failed ?? 0, already: json.already ?? 0 };
-        if (json.freeRemaining !== undefined && json.freeRemaining !== null) {
-          freeRemaining = json.freeRemaining;
-          if (!json.paid) usedNow = (quota?.limit ?? 20) - freeRemaining;
-        }
-        return true;
-      } catch {
-        return false;
-      }
-    };
-
-    const productName = products.find((p) => p.no === productNo)?.name ?? `상품 ${productNo}`;
-    // 이전 실행에서 끝난 구간 — 이번 실행의 results엔 안 잡히므로 "미등록" 계산에 더한다.
-    const resumedCount = Math.min(startResumeIdx * IMPORT_BATCH, reviews.length);
-    const totalPhotoDropped = photoDroppedCounts.reduce((s, n) => s + n, 0);
-    const persistSummary = (over: Partial<LastRun> = {}) => {
-      const resumed = resumedCount;
-      const written = over.written ?? results.reduce((s, r) => s + (r?.written ?? 0), 0);
-      const already = over.already ?? results.reduce((s, r) => s + (r?.already ?? 0), 0);
-      const failed = over.failed ?? results.reduce((s, r) => s + (r?.failed ?? 0), 0);
-      saveLastRun({
-        productNo,
-        productName,
-        fileName: file?.name ?? '',
-        parsed: reviews.length,
-        resumed,
-        written,
-        already,
-        failed,
-        notRegistered: Math.max(0, reviews.length - resumed - written - already),
-        photoDropped: over.photoDropped ?? totalPhotoDropped,
-      });
-    };
-
     try {
-      for (let idx = resumeIdx; idx < batchCount; idx++) {
-        if (quotaExhausted || stopRef.current) break;
-        const r = await sendOne(idx);
-        if (r.kind === 'quota') {
-          // 무료 한도 소진 — 여기까지 기록된 것을 남기고 중단한다.
-          quotaExhausted = true;
-          usedNow = r.json.used ?? usedNow;
-          saveProgress(rkey, resumeIdx * IMPORT_BATCH);
-          setResult({ quotaExceeded: true, used: usedNow });
-          setQuota((q) => (q ? { ...q, used: q.limit } : q));
-          break;
-        }
-        if (r.kind === 'err') {
-          // 배치 하나가 실패해도 전체를 멈추지 않는다 — 실패로 기록하고 아래 자동
-          // 이어하기 루프에서 물러나 다시 시도한다.
-          bumpAttempted(idx);
-          results[idx] = { written: 0, failed: sliceLen(idx), already: 0 };
-          continue;
-        }
-        onBatchDone(idx, r.json);
-      }
+      wakeLockRef.current = 'wakeLock' in navigator ? await navigator.wakeLock.request('screen') : null;
+    } catch {}
 
-      if (!quotaExhausted && !stopRef.current) {
-        // 자동 이어하기 루프 — 성공 배치는 해시로 걸러져(already) 안전하므로, 한 번의
-        // 「옮기기」로 파일 전체가 끝날 때까지 반복 진행한다. 실패가 이어지면
-        // 30→60→120초로 물러나 기다렸다가 다시 시도하고, 사용자가 「정지」를 누르거나
-        // 무료 한도가 소진된 경우에만 멈춘다.
-        let backoffStep = 0;
-        while (!quotaExhausted && !stopRef.current) {
-          const failedIdxs: number[] = [];
-          for (let idx = 0; idx < batchCount; idx++) {
-            // 영구 실패(400·422·행 단위 거부) 배치는 다시 시도해도 실패한다 — 무한 재시도를 막는다.
-            if (permanent[idx]) continue;
-            const r = results[idx];
-            if (!r || r.failed > 0) failedIdxs.push(idx);
-          }
-          if (!failedIdxs.length) break;
-          if (backoffStep > 0) {
-            // 진행 없이 실패가 이어진 라운드 — 물러난 뒤 다시 시도한다.
-            const waitMs = BACKOFF_STEPS_MS[Math.min(backoffStep - 1, BACKOFF_STEPS_MS.length - 1)];
-            await backoffWait(
-              waitMs,
-              () => stopRef.current || quotaExhausted,
-              (sec) => setImportProgress((p) => (p ? { ...p, retrying: sec } : p)),
-            );
-            if (stopRef.current || quotaExhausted) break;
-          }
-          let anyProgress = false;
-          for (const idx of failedIdxs) {
-            if (quotaExhausted || stopRef.current) break;
-            const ok = await sendRetry(idx);
-            if (ok) {
-              const rr = results[idx];
-              if (rr && rr.failed === 0) {
-                anyProgress = true;
-                done[idx] = true;
-                while (resumeIdx < batchCount && done[resumeIdx]) resumeIdx++;
-                saveProgressAndState();
-              }
-            }
-          }
-          backoffStep = anyProgress ? 0 : backoffStep + 1;
-          if (!stopRef.current && !quotaExhausted && failedIdxs.length) {
-            await new Promise((r) => setTimeout(r, RETRY_PAUSE_MS));
-          }
-        }
-      }
+    // 이 파일의 이어하기 지점. 가드에서 글을 지우면 이어하기가 지운 글을 건너뛰므로
+    // 아래에서 함께 초기화한다.
+    const rkey = resumeKey(productNo, prepared.fileHash);
 
-      const totalWritten = results.reduce((s, r) => s + (r?.written ?? 0), 0);
-      const totalFailed = results.reduce((s, r) => s + (r?.failed ?? 0), 0);
-      const totalAlready = results.reduce((s, r) => s + (r?.already ?? 0), 0);
-      const totalPermanentFailed = permanentCounts.reduce((s, n) => s + n, 0);
-
-      if (quotaExhausted) {
-        persistSummary();
-        setResult({ quotaExceeded: true, used: usedNow });
-        setQuota((q) => (q ? { ...q, used: q.limit } : q));
-        loadImports(1, filterProduct, filterPhotoDropped);
-      } else if (totalFailed > 0 || resumeIdx < batchCount) {
-        // 「정지」를 누르거나 영구 실패로 남은 건이 있다 — 여기까지 기록되고 다음
-        // 「옮기기」가 이어서 진행한다(중복은 서버가 걸러낸다).
-        persistSummary();
-        saveProgress(rkey, resumeIdx * IMPORT_BATCH);
-        loadImports(1, filterProduct, filterPhotoDropped);
-        setResult({
-          stage: 'stopped',
-          parsed: reviews.length,
-          written: totalWritten,
-          failed: totalFailed,
-          permanentFailed: totalPermanentFailed,
-          already: totalAlready,
-          photoDropped: totalPhotoDropped,
-          skipped: Math.max(0, reviews.length - resumedCount - totalWritten - totalAlready),
-          freeRemaining,
-          paid: quota?.paid,
-        });
-        if (!quota?.paid && typeof freeRemaining === 'number') {
-          const used = (quota?.limit ?? 20) - freeRemaining;
-          setQuota((q) => (q ? { ...q, used } : q));
-        }
-      } else {
-        // 전부 옮겨졌다 — 이어올 지점을 지운다.
-        persistSummary();
-        try {
-          localStorage.removeItem(rkey);
-        } catch {
-          // 저장소 접근이 거부되면 남은 진행 지점이 다음 번에 재개로 오인될 수 있지만,
-          // offset >= reviews.length면 readResume이 0으로 되돌리므로 실제 영향은 없다.
-        }
-        setResult({
-          parsed: reviews.length,
-          written: totalWritten,
-          failed: 0,
-          permanentFailed: totalPermanentFailed,
-          already: totalAlready,
-          photoDropped: totalPhotoDropped,
-          skipped: Math.max(0, reviews.length - resumedCount - totalWritten - totalAlready),
-          freeRemaining,
-          paid: quota?.paid,
-        });
-        if (!quota?.paid && typeof freeRemaining === 'number') {
-          const used = (quota?.limit ?? 20) - freeRemaining;
-          setQuota((q) => (q ? { ...q, used } : q));
-        }
-        setFilterProduct('');
-        loadImports(1, '');
-      }
-    } catch (e) {
-      // 중간 실패 — 진행 지점을 남겨 두어 다음 「옮기기」가 이어서 진행하게 한다.
-      persistSummary();
-      saveProgress(rkey, resumeIdx * IMPORT_BATCH);
-      setResult({
-        stage: 'write',
-        parsed: reviews.length,
-        written: results.reduce((s, r) => s + (r?.written ?? 0), 0),
-        failed: results.reduce((s, r) => s + (r?.failed ?? 0), 0),
-        permanentFailed: permanentCounts.reduce((s, n) => s + n, 0),
-        already: results.reduce((s, r) => s + (r?.already ?? 0), 0),
-        photoDropped: photoDroppedCounts.reduce((s, n) => s + n, 0),
-        skipped: reviews.length - results.reduce((s, r) => s + (r?.written ?? 0) + (r?.already ?? 0), 0),
-        error: (e as Error).message,
+    let startOffset = Math.floor(readResume(rkey) / IMPORT_BATCH) * IMPORT_BATCH;
+    if (startOffset >= reviews.length) startOffset = 0;
+    const resuming = startOffset > 0;
+    const productName = products.find((p) => p.no === productNo)?.name ?? `상품 ${productNo}`;
+    setImportProgress({ written: startOffset, total: reviews.length, failed: 0, resuming, retrying: null });
+    try {
+      const outcome = await transferReviews({
+        reviews, productNo: Number(productNo), source, startOffset,
+        shouldStop: () => stopRef.current,
+        onProgress: (progress) => {
+          saveProgress(rkey, progress.completedThrough);
+          setImportProgress({ written: startOffset + progress.written + progress.already,
+            total: reviews.length, failed: progress.failed, resuming, retrying: null });
+        },
       });
+      const notRegistered = Math.max(0, reviews.length - startOffset - outcome.written - outcome.already);
+      saveLastRun({ productNo: Number(productNo), productName, fileName: file.name,
+        parsed: reviews.length, resumed: startOffset, written: outcome.written, already: outcome.already,
+        failed: outcome.failed, photoDropped: outcome.photoDropped, notRegistered });
+      setResult({ ...outcome, parsed: reviews.length, paid: outcome.paid ?? quota?.paid,
+        quotaExceeded: outcome.quotaExhausted, used: outcome.quotaExhausted ? quota?.limit : undefined,
+        stage: notRegistered || outcome.error ? 'stopped' : undefined,
+        skipped: notRegistered });
+      if (outcome.paid !== undefined) setQuota(q => q ? { ...q, paid: outcome.paid! } : q);
+      if (outcome.freeRemaining !== null) setQuota((q) => q ? { ...q, used: q.limit - outcome.freeRemaining! } : q);
+      if (!notRegistered && !outcome.error) {
+        try { localStorage.removeItem(rkey); } catch {}
+      }
+      await loadImports(1, filterProduct, filterPhotoDropped);
+    } catch (e) {
+      setResult({ stage: 'write', error: (e as Error).message });
     } finally {
       setBusy(false);
       setImportProgress(null);
-      // 사진 누락 누계 갱신 — 안내 배너·필터용.
-      photoDroppedCount(filterProduct).then(setPhotoDroppedTotal);
-      try {
-        await wakeLockRef.current?.release();
-      } catch {}
+      try { await wakeLockRef.current?.release(); } catch {}
       wakeLockRef.current = null;
     }
   }
@@ -790,6 +480,7 @@ export default function Admin() {
 
   async function deleteImports(snos: number[]) {
     if (!snos.length || delBusy) return;
+    clearResume();
     setDelBusy(true);
     setImportedMsg('');
     setImportedError('');
@@ -846,6 +537,7 @@ export default function Admin() {
     )
       return;
     if (delBusy) return;
+    clearResume();
     setDelBusy(true);
     setImportedMsg('');
     setImportedError('');
@@ -895,52 +587,6 @@ export default function Admin() {
   }
 
   /** 사진 없이 등록된 리뷰만 골라 모두 삭제한다. 재이관 가드·「사진 빠진 리뷰만」 삭제에 쓴다. */
-  async function deletePhotoDroppedForProduct(productNo: number | '', totalHint: number): Promise<boolean> {
-    if (delBusy) return false;
-    setDelBusy(true);
-    setImportedMsg('');
-    setImportedError('');
-    setDeleteProgress({ deleted: 0, total: Math.max(1, totalHint), failed: 0 });
-    let totalDeleted = 0;
-    let totalFailed = 0;
-    let firstErr = '';
-    try {
-      let hasMore = true;
-      while (hasMore) {
-        const res = await fetch('/api/imports', {
-          method: 'DELETE',
-          headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(DELETE_FETCH_TIMEOUT_MS),
-          body: JSON.stringify({
-            all: true,
-            product_no: productNo || undefined,
-            photo_dropped: true,
-          }),
-        });
-        const json = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(json.error ?? '삭제하지 못했습니다.');
-        const deleted = (json.deleted ?? []).length;
-        totalDeleted += deleted;
-        totalFailed += (json.failed ?? []).length;
-        if (!firstErr && json.failed?.length) firstErr = json.failed[0].error ?? '';
-        hasMore = !!json.hasMore && deleted > 0;
-        setDeleteProgress({ deleted: totalDeleted, total: Math.max(1, totalHint), failed: totalFailed });
-      }
-      setImportedMsg(
-        totalFailed
-          ? `사진 빠진 리뷰 삭제 완료 ${totalDeleted}건 · 실패 ${totalFailed}건 (${firstErr})`
-          : `사진 빠진 리뷰 삭제 완료 ${totalDeleted}건`,
-      );
-      return true;
-    } catch (e) {
-      setImportedError((e as Error).message);
-      return false;
-    } finally {
-      setDelBusy(false);
-      setDeleteProgress(null);
-    }
-  }
-
   async function useSample() {
     const blob = await fetch('/sample-reviews.xlsx').then((r) => r.blob());
     setFile(new File([blob], 'sample-reviews.xlsx', { type: blob.type }));
@@ -957,7 +603,7 @@ export default function Admin() {
     );
 
   if (!mallName)
-    return <main className="p-8 text-sm dark:text-neutral-300">고도몰 관리자에서 앱을 실행해 주세요.</main>;
+    return <main className="p-8 text-sm dark:text-neutral-300">{goodsError || '고도몰 관리자에서 앱을 실행해 주세요.'}</main>;
 
   return (
     <main className="p-6 font-sans">
@@ -1231,7 +877,7 @@ export default function Admin() {
               </p>
               {(result.skipped ?? 0) > 0 ? (
                 <p className="mt-1 text-xs font-medium text-amber-600 dark:text-amber-400">
-                  파일의 {result.parsed}건 중 아직 {result.skipped}건이 등록되지 않았어요.{' '}
+                  파일의 {result.parsed}건 중 {result.skipped}건의 등록 완료를 확인하지 못했어요.{' '}
                   「옮기기」를 다시 누르면 중복 없이 이어서 등록됩니다.
                 </p>
               ) : null}

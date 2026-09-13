@@ -75,7 +75,9 @@ export async function GET() {
     });
   }
 
-  const ent = await getEntitlement(session.mallNo, session.accessToken);
+  let ent;
+  try { ent = await getEntitlement(session.mallNo, session.accessToken); }
+  catch { return NextResponse.json({ error: '이용권 상태를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요.' }, { status: 503 }); }
   const quota = await checkQuota(session.mallNo, 0, ent.paid);
 
   // 만료(EXPIRED)/삭제(DELETED) 상태에서는 godomall server API가 상품 목록을 SA0010

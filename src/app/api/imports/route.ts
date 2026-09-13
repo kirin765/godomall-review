@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sessionMall } from '@/lib/launch';
 import { deleteBoardArticle } from '@/lib/godomall';
-import { listImports, removeImports, listArticleNos, reconcileImports } from '@/lib/imports';
+import { listImports, removeImports, listArticleNos, ownedArticleNos, reconcileImports } from '@/lib/imports';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -91,7 +91,7 @@ export async function DELETE(req: NextRequest) {
     hasMore = picked.length > MAX_DELETE;
     snos = picked.slice(0, MAX_DELETE);
   } else {
-    snos = [...new Set((body.article_snos ?? []).map(Number).filter((n) => n > 0))].slice(0, MAX_DELETE);
+    snos = await ownedArticleNos(session.mallNo, [...new Set((body.article_snos ?? []).map(Number).filter((n) => Number.isSafeInteger(n) && n > 0))].slice(0, MAX_DELETE));
   }
   if (!snos.length) return NextResponse.json({ deleted: [], failed: [], hasMore: false });
 
@@ -120,7 +120,7 @@ export async function DELETE(req: NextRequest) {
         lastErr = (e as Error).message.slice(0, 200);
         const status = (e as { status?: number }).status;
         // 이미 지워진 글(404)은 목표가 이뤄진 것이다.
-        if (status === 404) return { ok: true, error: '' };
+        if (status === 404) return { ok: false, error: lastErr };
         if (attempt === 3) break;
         // 429(속도 제한)는 넉넉히, 그 외 타임아웃·연결 오류·5xx는 짧게 물러나 재시도한다.
         const wait = status === 429 ? 1200 * (attempt + 1) : 500 * (attempt + 1);
@@ -153,11 +153,12 @@ export async function DELETE(req: NextRequest) {
   await Promise.all(Array.from({ length: Math.min(DELETE_CONCURRENCY, snos.length) }, worker));
   try {
     await removeImports(session.mallNo, deleted);
-  } catch (e) {
-    console.error('[imports] ledger cleanup failed', (e as Error).message);
+  } catch {
+    return NextResponse.json({ error: '삭제 후 기록 저장에 실패했습니다. 목록을 확인해 주세요.', deleted, failed }, { status: 503 });
   }
   // 전체 삭제에서 아무것도 못 지웠으면 계속 순회하면 같은 글을 다시 시도해 무한 루프가 된다.
   // 이번 턴에서 한 건도 삭제되지 않았다면 중단한다.
+  if (body.all && deleted.length > 0) hasMore = ((await listArticleNos(session.mallNo, { productNo: Number(body.product_no) || undefined, photoDroppedOnly: body.photo_dropped === true }, 1))?.length ?? 0) > 0;
   const more = hasMore && deleted.length > 0;
   return NextResponse.json({ deleted, failed, hasMore: more });
 }

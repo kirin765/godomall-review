@@ -39,7 +39,7 @@ export async function reserveQuota(
   n: number,
 ): Promise<{ ok: boolean; used: number }> {
   const url = process.env.DATABASE_URL;
-  if (!url) return { ok: true, used: 0 };
+  if (!url) return { ok: false, used: 0 };
   const sql = postgres(url, { max: 1 });
   try {
     await sql`create table if not exists usage_counter (
@@ -48,6 +48,7 @@ export async function reserveQuota(
       const [row] = await sql<{ written: number }[]>`select written from usage_counter where mall_id = ${String(mallNo)}`;
       return { ok: true, used: row?.written ?? 0 };
     }
+    await sql`insert into usage_counter (mall_id, written) values (${String(mallNo)}, 0) on conflict do nothing`;
     const [row] = await sql<{ written: number }[]>`
       update usage_counter set written = written + ${n}, updated_at = now()
       where mall_id = ${String(mallNo)} and written + ${n} <= ${FREE_LIMIT}
