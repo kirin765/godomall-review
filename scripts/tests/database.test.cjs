@@ -24,7 +24,10 @@ test('platform transfer database integration',{skip:!url},async t=>{
  const table=platform==='makeshop'?'makeshop_review_imported':'godo_review_imported';
  const shopcol=platform==='makeshop'?'shop_uid':'mall_no';
  const review={content:'review',writer:'user****',score:4,createdAt:'2026-09-01',option:null,productName:null,images:[]};
- const identities=rows=>rows.map(row=>({legacyHash:imports.reviewHash(product,{...row,sourceId:undefined}),occurrence:Number(row.sourceId?.split(':')[1]??0)}));
+ const identities=rows=>rows.map(row=>{
+  const legacy={...row,sourceId:undefined};
+  return {legacyHash:imports.reviewHash(product,legacy),occurrence:Number(row.sourceId?.split(':')[1]??0),aliases:imports.reviewHashAliases(product,row),legacyAliases:imports.reviewHashAliases(product,legacy)};
+ });
  const split=(mall,reviews)=>{const rows=reviews.map(r=>writer.toNewImport(product,r));return imports.splitByExisting(mall,product,rows.map(r=>imports.reviewHash(product,r)),identities(rows));};
  const quota=loadSource('src/lib/quota.ts',{postgres:factory,'./billing':{getSubscription:async()=>({status:'trial',expiredAt:'2099-01-01'}),daysLeft:()=>14,TRIAL_DAYS:14,PLAN:{name:'Plus',price:9900,termDays:30}}});
  await t.test('first reservation and concurrent requests cannot exceed free quota',async()=>{
@@ -45,6 +48,14 @@ test('platform transfer database integration',{skip:!url},async t=>{
   const row=writer.toNewImport(product,{...review,sourceId:undefined});row.dedup_hash=imports.reviewHash(product,row);
   await imports.recordImports(mall,[row,row]);
   assert.deepEqual(await split(mall,reviews),{already:2,blocked:0,pendingIndices:[2]});
+ });
+ await t.test('legacy CRLF hashes remain deduplicated after normalization',async()=>{
+  const mall=7008;
+  const rows=identifyReviews([{...review,content:'legacy\r\nline'}]);
+  const legacy=writer.toNewImport(product,{...review,content:'legacy\r\nline',sourceId:undefined});
+  legacy.dedup_hash=imports.reviewHashAliases(product,legacy)[0];
+  await imports.recordImports(mall,[legacy]);
+  assert.deepEqual(await split(mall,rows),{already:1,blocked:0,pendingIndices:[]});
  });
  await t.test('paid status stays unlimited and expiration is observed without restarting',async()=>{
   if(platform==='makeshop'){

@@ -52,7 +52,18 @@ export type { WriteOutcome } from './writeClaimedReviews';
 
 export async function writeReviews(token: string, mallNo: number, productNo: number, source: string, reviews: ImportedReview[], deadline = Date.now() + BUDGET_MS): Promise<WriteOutcome> {
   const rows = reviews.map(r => { const row = toNewImport(productNo, r); return { ...row, dedup_hash: reviewHash(productNo, row) }; });
-  return writeClaimedReviews({ rows, hashes: rows.map(r => r.dedup_hash), batchSize: BULK_MAX, deadline,
+  // Godomall returns only success/fail counts. Isolate photo rows so a rejected
+  // attachment cannot make us guess which neighboring text rows succeeded.
+  const chunks: { start: number; count: number }[] = [];
+  for (let start = 0; start < reviews.length;) {
+    let count = 1;
+    if (!reviews[start].images.length) {
+      while (start + count < reviews.length && count < BULK_MAX && !reviews[start + count].images.length) count++;
+    }
+    chunks.push({ start, count });
+    start += count;
+  }
+  return writeClaimedReviews({ rows, hashes: rows.map(r => r.dedup_hash), batchSize: BULK_MAX, chunks, deadline,
     claim: hashes => claimImports(mallNo, hashes), release: hashes => releaseClaims(mallNo, hashes),
     save: rows => recordImports(mallNo, rows),
     send: async (start, count, signal) => {

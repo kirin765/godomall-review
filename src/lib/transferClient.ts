@@ -6,7 +6,7 @@ export type TransferProgress = {
   permanentFailed: number; photoDropped: number; completedThrough: number;
   paid?: boolean; freeRemaining: number | null; quotaExhausted: boolean; error?: string;
 };
-type BatchResult = Omit<TransferProgress, 'completedThrough' | 'error'> & { retryableIndices?: number[] };
+type BatchResult = Omit<TransferProgress, 'completedThrough' | 'error'> & { retryableIndices?: number[]; failureReason?: string };
 
 function readBatch(value: unknown, count: number): BatchResult | null {
   if (!value || typeof value !== 'object') return null;
@@ -20,7 +20,7 @@ function readBatch(value: unknown, count: number): BatchResult | null {
   if (retryable !== undefined && (!Array.isArray(retryable) || new Set(retryable).size !== retryable.length ||
     retryable.some((n) => !Number.isSafeInteger(n) || n < 0 || n >= count) ||
     retryable.length > numbers.failed - numbers.permanentFailed - numbers.uncertain)) return null;
-  return { ...numbers, ...(typeof r.paid === 'boolean' ? { paid: r.paid } : {}), ...(Array.isArray(retryable) ? { retryableIndices: retryable as number[] } : {}), quotaExhausted: r.quotaExhausted === true, freeRemaining: typeof r.freeRemaining === 'number' ? r.freeRemaining : null };
+  return { ...numbers, ...(typeof r.paid === 'boolean' ? { paid: r.paid } : {}), ...(Array.isArray(retryable) ? { retryableIndices: retryable as number[] } : {}), ...(typeof r.failureReason === 'string' ? { failureReason: r.failureReason } : {}), quotaExhausted: r.quotaExhausted === true, freeRemaining: typeof r.freeRemaining === 'number' ? r.freeRemaining : null };
 }
 
 /** Sequential, bounded retries. Persist only the fully completed contiguous prefix. */
@@ -36,6 +36,7 @@ export async function transferReviews(options: {
   const results = new Map<number, BatchResult>();
   let completedThrough = start;
   let error: string | undefined;
+  let failureReason: string | undefined;
   let freeRemaining: number | null = null;
   let quotaExhausted = false;
   let paid: boolean | undefined;
@@ -85,6 +86,7 @@ export async function transferReviews(options: {
       } : received;
       if (!result) { error = '이관 결과의 건수가 맞지 않아 멈췄습니다. 옮긴 리뷰 목록을 확인해 주세요.'; break; }
       results.set(offset, result);
+      failureReason ??= result.failureReason;
       freeRemaining = result.freeRemaining;
       if (result.paid !== undefined) paid = result.paid;
       quotaExhausted = result.quotaExhausted;
@@ -104,5 +106,6 @@ export async function transferReviews(options: {
     }
     onProgress(summary());
   }
+  error ??= failureReason;
   return summary();
 }

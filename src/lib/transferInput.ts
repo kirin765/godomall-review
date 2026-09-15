@@ -1,4 +1,4 @@
-import { maskWriter, toDateTime, type ImportedReview } from './reviewImport';
+import { maskWriter, normalizeReviewLineEndings, toDateTime, type ImportedReview } from './reviewImport';
 
 export const MAX_BATCH = 200;
 
@@ -8,13 +8,13 @@ export function normalizeReviews(raw: unknown[]): ImportedReview[] {
     const fail = (message: string): never => { throw new Error(`${index + 1}번째 리뷰: ${message}`); };
     if (!value || typeof value !== 'object') return fail('리뷰 형식이 올바르지 않습니다.');
     const r = value as Partial<ImportedReview>;
-    const content = typeof r.content === 'string' ? r.content.trim() : '';
+    const content = typeof r.content === 'string' ? normalizeReviewLineEndings(r.content).trim() : '';
     if (!content || content.length > 5000) return fail('본문은 1~5,000자여야 합니다.');
     const score = Number(r.score);
     if (!Number.isInteger(score) || score < 1 || score > 5) return fail('평점은 1~5 사이의 정수여야 합니다.');
     const createdAt = r.createdAt == null || r.createdAt === '' ? null : String(r.createdAt);
     if (createdAt && !toDateTime(createdAt)) return fail('작성일을 확인해 주세요.');
-    const option = r.option ? String(r.option) : null;
+    const option = r.option ? normalizeReviewLineEndings(String(r.option)) : null;
     if (option && option.length > 200) return fail('옵션은 200자 이하여야 합니다.');
     const images = r.images ?? [];
     if (!Array.isArray(images) || images.length > 10) return fail('사진은 최대 10장까지 옮길 수 있습니다.');

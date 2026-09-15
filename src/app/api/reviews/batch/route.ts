@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { checkQuota, reserveQuota, releaseQuota, FREE_LIMIT } from '@/lib/quota';
 import { writeReviews, toNewImport } from '@/lib/writeReviews';
 import { normalizeReviews, MAX_BATCH } from '@/lib/transferInput';
-import { splitByExisting, reviewHash } from '@/lib/imports';
+import { splitByExisting, reviewHash, reviewHashAliases } from '@/lib/imports';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,7 +26,15 @@ export async function POST(req: NextRequest) {
 
   const ledger = reviews.map(r => toNewImport(productNo, r));
   const hashes = ledger.map(row => reviewHash(productNo, row));
-  const identities = ledger.map(row => ({ legacyHash: reviewHash(productNo, { ...row, sourceId: undefined }), occurrence: Number(row.sourceId?.split(':')[1] ?? 0) }));
+  const identities = ledger.map(row => {
+    const legacy = { ...row, sourceId: undefined };
+    return {
+      legacyHash: reviewHash(productNo, legacy),
+      occurrence: Number(row.sourceId?.split(':')[1] ?? 0),
+      aliases: reviewHashAliases(productNo, row),
+      legacyAliases: reviewHashAliases(productNo, legacy),
+    };
+  });
   let dedup; let quota;
   try {
     [dedup, quota] = await Promise.all([splitByExisting(shop, productNo, hashes, identities), getEntitlement(shop, session.accessToken).then(ent => checkQuota(shop, reviews.length, ent.paid))]);

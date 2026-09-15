@@ -134,6 +134,11 @@ function fmtKst(y: number, mo: number, d: number, h: number, mi: number, s: numb
   return `${y}-${p(mo)}-${p(d)} ${p(h)}:${p(mi)}:${p(s)}`;
 }
 
+/** Excel exports can encode the same visible line break as LF, CRLF, or CR. */
+export function normalizeReviewLineEndings(s: string): string {
+  return s.replace(/\r\n?/g, '\n');
+}
+
 /** 엑셀에는 마스킹이 안 돼 있을 수 있다. 앞 4자만 남기고 가린다. */
 export function maskWriter(s: string): string {
   const t = s.trim();
