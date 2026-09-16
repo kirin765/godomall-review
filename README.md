@@ -1,5 +1,28 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## 결제 (Paddle Billing)
+
+리뷰이사 플러스(월 9,900원, 부가세 포함)는 **Paddle Billing** 호스티드 체크아웃(Paddle.js overlay)으로 수신한다.
+
+- 관리 화면(`/admin`)의 `PlanCard` → `PaddlePay` 컴포넌트가 `/api/goods`의 `plan.payment` 설정으로 결제 버튼을 렌더링한다.
+- 결제 완료/구독 갱신은 웹훅 `POST /api/payment/paddle/webhook`으로 통보받아
+  `custom_data.mallNo`로 몰을 식별 → workspace 만료일 연장 + `app_subscriptions` 기록 → 무제한 전환한다.
+- Paddle 대시보드 > Developer tools > Notifications에서 위 웹훅 URL을 destination으로 등록하고
+  `subscription.created`·`subscription.activated`·`subscription.updated`·`subscription.canceled`·`transaction.completed`를 구독한다.
+
+필요한 환경변수:
+
+| 변수 | 설명 |
+| --- | --- |
+| `PADDLE_ENV` | `sandbox`(기본) 또는 `production` |
+| `PADDLE_CLIENT_TOKEN` | Paddle.js client-side 토큰 (공개 가능) |
+| `PADDLE_PRICE_ID` | 리뷰이사 플러스 가격 ID (`pri_…`) |
+| `PADDLE_WEBHOOK_SECRET` | 웹훅 서명 검증 시크릿 (`pdl_ntfset_…`, 서버 전용) |
+| `PADDLE_API_KEY` | 서버 API 키 (`pdl_live_…`/`pdl_sdbx_…`, 서버 전용) |
+| `PADDLE_CURRENCY` | 표시 통화 (기본 `KRW`) |
+
+값이 비어 있으면 관리 화면은 결제 버튼 대신 판매사 문의 안내를 보여준다(결제 비활성).
+
 ## 고객지원 챗봇 (AI)
 
 모든 페이지 우측 하단의 채팅 버튼과 [`/support`](http://localhost:3000/support) 페이지에

@@ -22,9 +22,15 @@ type ImportedReview = {
 };
 type PaymentInfo = {
   method?: string;
-  bank?: string;
-  account?: string;
-  holder?: string;
+  /** Paddle 설정이 준비됐는지 — false면 결제 버튼 대신 문의 안내를 보여준다 */
+  enabled?: boolean;
+  env?: 'sandbox' | 'production';
+  /** Paddle.js client-side 토큰 (공개 가능) */
+  clientToken?: string;
+  /** 리뷰이사 플러스 가격 ID */
+  priceId?: string;
+  currency?: string;
+  price?: number;
   vatIncluded?: boolean;
   contactEmail?: string;
 };
@@ -36,7 +42,7 @@ type Plan = {
   blockedBy: 'expired' | 'deleted' | null;
   /** 앱스토어 앱 상세 URL — 없으면 결제 문구를 링크 없이 보여준다. */
   storeUrl: string | null;
-  /** 수동 계좌이체 결제 안내 — 계좌·금액·연락처 */
+  /** Paddle 결제 설정 — 결제 버튼에 쓰는 공개 가능한 값들 */
   payment?: PaymentInfo | null;
 };
 type Result = {
@@ -130,19 +136,135 @@ function fmtDate(iso: string | null | undefined): string {
   return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
 }
 
-/** 수동 계좌이체 결제 안내 블록 — plan.payment가 있으면 계좌/금액/연락처를 보여준다 */
-function BankPay({ pay, price }: { pay: PaymentInfo; price: number }) {
-  if (pay.method !== 'bank' || !pay.account) return null;
-  const vatLabel = pay.vatIncluded ? `${price.toLocaleString()}원(부가세 포함)` : `${price.toLocaleString()}원(부가세 별도)`;
+/**
+ * Paddle.js 체크아웃 로더.
+ * 스크립트와 Initialize는 페이지당 1회만 — 재시도 가능하게 실패 시 초기화를 되돌린다.
+ * 결제 완료는 window 이벤트로 알려 PaddlePay 컴포넌트가 플랜을 새로 고치게 한다.
+ */
+const PADDLE_SCRIPT_SRC = 'https://cdn.paddle.com/paddle/v2/paddle.js';
+const PADDLE_COMPLETED_EVENT = 'paddle:checkout-completed';
+
+type PaddleEvent = { name?: string };
+type PaddleInstance = {
+  Environment?: { set: (env: string) => void };
+  Initialize: (opts: Record<string, unknown>) => void;
+  Checkout: { open: (opts: Record<string, unknown>) => void };
+};
+
+function paddleInstance(): PaddleInstance | null {
+  if (typeof window === 'undefined') return null;
+  return (window as unknown as { Paddle?: PaddleInstance }).Paddle ?? null;
+}
+
+function loadPaddleScript(): Promise<void> {
+  if (paddleInstance()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[data-paddle]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', () => reject(new Error('Paddle 결제 모듈을 불러오지 못했습니다.')));
+      return;
+    }
+    const s = document.createElement('script');
+    s.src = PADDLE_SCRIPT_SRC;
+    s.async = true;
+    s.dataset.paddle = '1';
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Paddle 결제 모듈을 불러오지 못했습니다.'));
+    document.head.appendChild(s);
+  });
+}
+
+let paddleInit: Promise<void> | null = null;
+function ensurePaddle(pay: PaymentInfo): Promise<void> {
+  paddleInit ??= loadPaddleScript()
+    .then(() => {
+      const p = paddleInstance();
+      if (!p) throw new Error('Paddle 결제 모듈을 불러오지 못했습니다.');
+      if (pay.env === 'sandbox') p.Environment?.set('sandbox');
+      p.Initialize({
+        token: pay.clientToken,
+        eventCallback: (e: PaddleEvent) => {
+          if (e?.name === 'checkout.completed') window.dispatchEvent(new Event(PADDLE_COMPLETED_EVENT));
+        },
+      });
+    })
+    .catch((e) => {
+      paddleInit = null;
+      throw e;
+    });
+  return paddleInit;
+}
+
+/**
+ * Paddle 결제 버튼 — 리뷰이사 플러스(월 구독)를 카드·간편결제로 결제한다.
+ * customData.mallNo가 웹훅에서 몰을 식별하는 유일한 연결고리다.
+ */
+function PaddlePay({ pay, price, mallNo, onPaid }: { pay: PaymentInfo; price: number; mallNo: number; onPaid?: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    if (!onPaid) return;
+    const handler = () => { setDone(true); onPaid(); };
+    window.addEventListener(PADDLE_COMPLETED_EVENT, handler);
+    return () => window.removeEventListener(PADDLE_COMPLETED_EVENT, handler);
+  }, [onPaid]);
+
+  const vatLabel = pay.vatIncluded ? `월 ${price.toLocaleString()}원(부가세 포함)` : `월 ${price.toLocaleString()}원(부가세 별도)`;
+
+  const boxClass = 'mt-3 rounded border border-dashed border-neutral-300 bg-white p-3 text-[11px] text-neutral-700 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-300';
+
+  if (!pay.enabled) {
+    return (
+      <div className={boxClass}>
+        <p className="font-medium text-neutral-900 dark:text-neutral-100">결제 모듈을 준비 중입니다</p>
+        <p className="mt-1">
+          리뷰이사 플러스({vatLabel}) 결제·문의는 {pay.contactEmail ?? '판매사'}로 연락해 주세요.
+        </p>
+      </div>
+    );
+  }
+
+  const openCheckout = async () => {
+    setError('');
+    setBusy(true);
+    try {
+      await ensurePaddle(pay);
+      const p = paddleInstance();
+      if (!p) throw new Error('Paddle 결제 모듈을 불러오지 못했습니다.');
+      p.Checkout.open({
+        items: [{ priceId: pay.priceId, quantity: 1 }],
+        customData: { mallNo: String(mallNo) },
+        settings: { displayMode: 'overlay', theme: 'light', locale: 'ko' },
+      });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <div className="mt-3 rounded border border-dashed border-neutral-300 bg-white p-3 text-[11px] text-neutral-700 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
-      <p className="font-medium text-neutral-900 dark:text-neutral-100">계좌이체로 결제 — 월 {vatLabel}</p>
-      <p className="mt-1">
-        입금 계좌: <span className="font-semibold">{pay.bank} {pay.account}</span> (예금주 {pay.holder})
-      </p>
-      <p className="mt-1">
-        이체 후 {pay.contactEmail ?? '판매사'}로 입금자명을 알려주시면 확인 후 무제한으로 전환해 드립니다.
-        <br />세금계산서가 필요하시면 이체와 함께 요청해 주세요.
+    <div className={boxClass}>
+      <p className="font-medium text-neutral-900 dark:text-neutral-100">카드·간편결제로 결제 — {vatLabel}</p>
+      <button
+        type="button"
+        onClick={openCheckout}
+        disabled={busy || mallNo <= 0}
+        className="mt-2 rounded bg-black px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 dark:bg-white dark:text-black"
+      >
+        {busy ? '결제창 여는 중…' : `리뷰이사 플러스 결제하기 (${price.toLocaleString()}원)`}
+      </button>
+      {done && (
+        <p className="mt-2 text-emerald-700 dark:text-emerald-400">
+          결제가 접수되었습니다. 반영까지 잠시(최대 몇 분) 걸릴 수 있어요. 잠시 후 새로고침해 주세요.
+        </p>
+      )}
+      {error && <p className="mt-2 text-red-600 dark:text-red-400">{error}</p>}
+      <p className="mt-2">
+        결제 즉시 무제한으로 전환되며, 월 단위로 자동 갱신됩니다. 해지·환불 문의는 {pay.contactEmail ?? '판매사'}로 연락해 주세요.
       </p>
     </div>
   );
@@ -167,7 +289,7 @@ function PhotoDroppedNotice({ count }: { count: number }) {
   );
 }
 
-function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
+function PlanCard({ quota, plan, mallNo, onPaid }: { quota: Quota | null; plan: Plan | null; mallNo: number; onPaid?: () => void }) {
   const price = plan?.price ?? 9900;
   const pay = plan?.payment;
 
@@ -176,9 +298,9 @@ function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
       <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-950/40">
         <p className="text-sm font-semibold text-amber-900 dark:text-amber-300">리뷰이사 플러스 — 무제한 이용 중</p>
         {plan.expireAt && (
-          <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">다음 결제일(만료): {fmtDate(plan.expireAt)} — 연장 결제 후 계속 이용하세요.</p>
+          <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">다음 결제일(만료): {fmtDate(plan.expireAt)} — 자동 갱신됩니다.</p>
         )}
-        {pay && <BankPay pay={pay} price={price} />}
+        {pay && <PaddlePay pay={pay} price={price} mallNo={mallNo} onPaid={onPaid} />}
       </div>
     );
   }
@@ -190,12 +312,12 @@ function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
     return (
       <div className="mt-4 rounded-lg border border-red-300 bg-red-50 p-4 dark:border-red-700 dark:bg-red-950/40">
         <p className="text-sm font-semibold text-red-800 dark:text-red-300">
-          {plan.blockedBy === 'deleted' ? '앱이 삭제된 상태입니다. 다시 설치해 주세요.' : '유료 플랜 이용 기간이 끝났습니다.'}
+          {plan.blockedBy === 'deleted' ? '앱이 삭제된 상태입니다. 다시 설치해 주세요.' : '무료 체험이 끝났습니다.'}
         </p>
         <p className="mt-1 text-[11px] text-red-700 dark:text-red-400">
-          리뷰이사 플러스(월 {price.toLocaleString()}원)를 연장하면 다시 이용할 수 있습니다.
+          리뷰이사 플러스(월 {price.toLocaleString()}원)를 시작하면 다시 이용할 수 있습니다.
         </p>
-        {pay && <BankPay pay={pay} price={price} />}
+        {pay && <PaddlePay pay={pay} price={price} mallNo={mallNo} onPaid={onPaid} />}
       </div>
     );
   }
@@ -203,23 +325,29 @@ function PlanCard({ quota, plan }: { quota: Quota | null; plan: Plan | null }) {
   return (
     <div className="mt-4 rounded-lg border border-neutral-300 bg-white p-4 dark:border-neutral-700 dark:bg-neutral-800">
       <p className="text-sm font-medium dark:text-neutral-100">
-        {used >= limit ? '무료 20건(쇼핑몰당)을 모두 사용했어요' : `무료 ${limit}건 중 ${used}건 사용`}
+        {used >= limit ? '오늘 무료 20건을 모두 사용했어요' : `오늘 무료 ${limit}건 중 ${used}건 사용`}
       </p>
       <div className="mt-3 h-1.5 w-full rounded-full bg-neutral-100 dark:bg-neutral-700">
         <div className="h-1.5 rounded-full bg-black transition-all dark:bg-white" style={{ width: `${Math.min(100, Math.round((used / limit) * 100))}%` }} />
       </div>
       <p className="mt-2 text-[11px] text-neutral-500 dark:text-neutral-400">
         {used >= limit
-          ? '리뷰이사 플러스(월 9,900원, 부가세 포함)로 전환하면 무제한으로 쓸 수 있어요. 아래 계좌로 이체 후 입금자명을 알려주세요.'
-          : '쇼핑몰당 무료 20건까지 옮겨볼 수 있어요. 그 이상은 리뷰이사 플러스(월 9,900원)로 무제한.'}
+          ? '내일 0시에 다시 20건이 채워집니다. 하루 20건으로 부족하면 리뷰이사 플러스(월 9,900원, 부가세 포함)로 무제한 이용하세요. 아래 버튼으로 결제할 수 있어요.'
+          : '무료 체험 14일 동안 매일 20건까지 옮길 수 있어요. 그 이상은 리뷰이사 플러스(월 9,900원)로 무제한.'}
       </p>
-      {pay && used >= limit && <BankPay pay={pay} price={price} />}
+      {plan?.expireAt && (
+        <p className="mt-1 text-[11px] text-neutral-400 dark:text-neutral-500">
+          무료 체험 종료일: {fmtDate(plan.expireAt)} (이후 리뷰이사 플러스로 계속 이용)
+        </p>
+      )}
+      {pay && used >= limit && <PaddlePay pay={pay} price={price} mallNo={mallNo} onPaid={onPaid} />}
     </div>
   );
 }
 
 export default function Admin() {
   const [loading, setLoading] = useState(true);
+  const [mallNo, setMallNo] = useState(0);
   const [mallName, setMallName] = useState('');
   const [quota, setQuota] = useState<Quota | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
@@ -259,11 +387,12 @@ export default function Admin() {
   // 이관 중 화면이 잠자지 않게(Sleep 방지) Wake Lock을 잡는다.
   const wakeLockRef = useRef<Awaited<ReturnType<Navigator['wakeLock']['request']>> | null>(null);
 
-  useEffect(() => {
-    fetch('/api/goods')
+  /** 몰·플랜·상품 정보를 불러온다. Paddle 결제 완료 후 플랜을 새로 고치는 데도 쓴다. */
+  const loadGoods = useCallback(() => {
+    return fetch('/api/goods')
       .then(async r => { const data = await r.json(); if (!r.ok) throw new Error(data.error ?? '몰 정보를 불러오지 못했습니다.'); return data; })
       .then((d: GoodsPayload) => {
-        if (d.mallNo) setMallName(`몰 #${d.mallNo}`);
+        if (d.mallNo) { setMallNo(d.mallNo); setMallName(`몰 #${d.mallNo}`); }
         if (d.quota) setQuota(d.quota);
         if (d.plan) setPlan(d.plan);
         if (d.goodsError) setGoodsError(d.goodsError);
@@ -272,6 +401,16 @@ export default function Admin() {
       .catch(error => setGoodsError((error as Error).message))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => { void loadGoods(); }, [loadGoods]);
+
+  /**
+   * Paddle 결제 완료 → 웹훅이 플랜을 갱신할 시간을 준 뒤 다시 불러온다.
+   * (결제창 완료 이벤트는 웹훅 처리보다 먼저 도착하므로 즉시 조회하면 아직 free로 보인다)
+   */
+  const reloadPlanAfterPayment = useCallback(() => {
+    window.setTimeout(() => { void loadGoods(); }, 3000);
+  }, [loadGoods]);
 
   const loadImports = useCallback(async (pageNum: number, productNo: number | '', photoDroppedOnly = false) => {
     setImportedError('');
@@ -782,17 +921,17 @@ export default function Admin() {
         </div>
       )}
 
-      <PlanCard quota={quota} plan={plan} />
+      <PlanCard quota={quota} plan={plan} mallNo={mallNo} onPaid={reloadPlanAfterPayment} />
 
       <p className="mt-8 border-t pt-4 text-xs text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
-        쇼핑몰당 무료 20건 · 리뷰이사 플러스(무제한) 월 9,900원(부가세 포함){' · '}
+        무료 체험 14일(하루 20건) · 리뷰이사 플러스(무제한) 월 9,900원(부가세 포함){' · '}
         <a href="/privacy" className="underline">개인정보처리방침</a>
       </p>
 
       {result && (
         <div className="mt-6 rounded bg-neutral-50 p-4 text-sm dark:bg-neutral-800/60">
           {result.quotaExceeded ? (
-            <PlanCard quota={quota} plan={plan} />
+            <PlanCard quota={quota} plan={plan} mallNo={mallNo} onPaid={reloadPlanAfterPayment} />
           ) : result.stage === 'stopped' ? (
             <>
               <p className="font-medium text-amber-700 dark:text-amber-400">
@@ -861,7 +1000,7 @@ export default function Admin() {
               </ul>
               {!result.paid && (result.count ?? 0) > (result.allowed ?? Infinity) ? (
                 <div className="mt-2">
-                  <PlanCard quota={quota} plan={plan} />
+                  <PlanCard quota={quota} plan={plan} mallNo={mallNo} onPaid={reloadPlanAfterPayment} />
                 </div>
               ) : (
                 <p className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
@@ -893,7 +1032,7 @@ export default function Admin() {
               ) : null}
               {!result.paid && (result.skipped ?? 0) > 0 ? (
                 <div className="mt-2">
-                  <PlanCard quota={quota} plan={plan} />
+                  <PlanCard quota={quota} plan={plan} mallNo={mallNo} onPaid={reloadPlanAfterPayment} />
                 </div>
               ) : (result.skipped ?? 0) > 0 ? (
                 <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">(건너뜀 {result.skipped}건)</p>

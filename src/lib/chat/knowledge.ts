@@ -15,12 +15,11 @@ const SUPPORT = {
   supportUrl: '/support',
 };
 
-/** 수동 계좌이체 결제 정보 — 앱스토어에 결제 수단이 없어 셀러↔몰 직거래로 수신한다 (사용자 확정, 2026-09-02) */
+/** 결제 안내 — Paddle 호스티드 체크아웃(카드·간편결제)으로 수신한다 (2026-09 결제수단 변경) */
 const PAYMENT = {
   price: '월 9,900원(부가세 포함)',
-  bank: '토스뱅크',
-  account: '1002-5844-8101',
-  holder: '온누리문방구',
+  method: '카드·간편결제',
+  note: '관리 화면의 [리뷰이사 플러스 결제하기] 버튼으로 결제하면 즉시 무제한으로 전환되고, 월 단위로 자동 갱신됩니다.',
 };
 
 /** 플랫폼별 정보 — 이 객체만 플랫폼마다 다르다 */
@@ -31,22 +30,32 @@ const PLATFORM = {
     '고도몰 쇼핑몰 관리자의 "앱 서비스 → 설치 리스트"에서 이 앱을 실행하면 이곳으로 연결됩니다',
   targetBoard: '고도몰 상품 후기',
   freeQuota: 20,
+  freeTrialDays: 14,
   /** 현재 앱 상태 — 고객에게 안내할 문구 */
   status:
-    '무료 20건까지 리뷰를 옮길 수 있고, 리뷰이사 플러스(' + PAYMENT.price + ')로 무제한 이용할 수 있습니다. ' +
-    `결제는 계좌이체(${PAYMENT.bank} ${PAYMENT.account}, 예금주 ${PAYMENT.holder})로 받으며, 입금 확인 후 무제한으로 전환해 드립니다.`,
+    '무료 체험 14일 동안 매일 20건까지 리뷰를 옮길 수 있고(한국시간 자정에 초기화), ' +
+    '리뷰이사 플러스(' + PAYMENT.price + ')로 무제한 이용할 수 있습니다. ' +
+    `${PAYMENT.note}`,
   priceNote: PAYMENT.price + ' (리뷰이사 플러스)',
 };
 
 /** 상황 → 안내. 챗봇은 이 표를 참고해 답한다 (추측 금지). */
 const ERROR_GUIDES: { when: string; guide: string }[] = [
   {
-    when: '무료 한도 소진 — "무료 20건을 모두 사용했어요" / 402 / 남은 건수 0',
+    when: '무료 한도 소진 — "오늘 무료 20건을 모두 사용했어요" / 402 / 남은 건수 0',
     guide:
-      `무료 ${PLATFORM.freeQuota}건을 모두 사용하면 더 이상 등록되지 않습니다. ` +
-      `리뷰이사 플러스(${PAYMENT.price})로 전환하면 무제한으로 이어서 옮길 수 있습니다. ` +
-      `결제는 계좌이체(${PAYMENT.bank} ${PAYMENT.account}, 예금주 ${PAYMENT.holder})로 받으며, 입금 후 ${SUPPORT.supportEmail}로 입금자명을 알려주시면 확인 후 무제한으로 전환해 드립니다. ` +
+      `무료는 하루 ${PLATFORM.freeQuota}건까지입니다(한국시간 자정에 초기화). 오늘 한도를 다 쓰면 ` +
+      `내일 0시부터 다시 ${PLATFORM.freeQuota}건이 채워집니다. 하루 한도로 부족하면 리뷰이사 플러스(${PAYMENT.price})로 전환하면 ` +
+      `무제한으로 이어서 옮길 수 있습니다. ` +
+      `결제는 ${PAYMENT.method}로 받으며, ${PAYMENT.note} ` +
       `결제·이용 중 문제가 있으면 ${SUPPORT.supportEmail}로 문의해 주세요.`,
+  },
+  {
+    when: '무료 체험 종료 — "무료 체험이 끝났습니다" / 설치 후 14일 경과 / 403 SA0010',
+    guide:
+      `무료 체험 기간은 설치 후 ${PLATFORM.freeTrialDays}일입니다(그동안 매일 ${PLATFORM.freeQuota}건). ` +
+      `체험이 끝나면 리뷰이사 플러스(${PAYMENT.price})로 전환해야 계속 이용할 수 있습니다. ` +
+      `결제는 ${PAYMENT.method}로 받으며, ${PAYMENT.note}`,
   },
   {
     when: '세션·인증 문제 — 401 / "세션이 없어요" / 로그인이 풀렸다는 메시지',
@@ -70,9 +79,9 @@ const ERROR_GUIDES: { when: string; guide: string }[] = [
   {
     when: '유료·결제 문의 — "유료는 언제?", "결제 되나요?", "월 요금은?"',
     guide:
-      `리뷰이사 플러스는 ${PAYMENT.price}·월간 구독입니다. 결제는 계좌이체(${PAYMENT.bank} ${PAYMENT.account}, 예금주 ${PAYMENT.holder})로 받으며, ` +
-      `입금 후 ${SUPPORT.supportEmail}로 입금자명을 알려주시면 확인 후 무제한 이용으로 전환해 드립니다. 세금계산서가 필요하면 함께 요청해 주세요. ` +
-      `무료 ${PLATFORM.freeQuota}건은 가입 없이 누구나 사용할 수 있습니다. ` +
+      `리뷰이사 플러스는 ${PAYMENT.price}·월간 구독입니다. 결제는 ${PAYMENT.method}로 받으며, ${PAYMENT.note} ` +
+      `해지·환불·세금계산서 등 자세한 내용은 ${SUPPORT.supportEmail}로 문의해 주세요. ` +
+      `무료 체험은 ${PLATFORM.freeTrialDays}일 동안 매일 ${PLATFORM.freeQuota}건까지 가입 없이 사용할 수 있습니다. ` +
       `환불·일정 등 자세한 내용은 ${SUPPORT.supportEmail}로 문의해 주세요.`,
   },
   {

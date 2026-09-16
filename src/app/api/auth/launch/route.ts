@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { exchangeLongLived, getMallProfile } from '@/lib/godomall';
 import { sessionCookie } from '@/lib/launch';
 import { saveToken } from '@/lib/entitlement';
+import { ensureFreeTrial } from '@/lib/trial';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -48,6 +49,13 @@ export async function GET(req: NextRequest) {
       await saveToken(profile.mallNo, access_token);
     } catch {
       /* 저장 실패해도 로그인은 진행(무료 폴백) — 웹훅 결제 경로만 나중에 문제 */
+    }
+
+    // 무료 체험 14일 부여 — 몰당 1회, 유료 구독이 없을 때만. 실패해도 로그인은 진행한다.
+    try {
+      await ensureFreeTrial(profile.mallNo, access_token);
+    } catch {
+      /* 체험 부여 실패는 다음 실행에서 재시도된다 */
     }
 
     const res = NextResponse.redirect(new URL('/admin', req.url));

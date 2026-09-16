@@ -1,7 +1,7 @@
 /**
  * 유료/무료 자격(entitlement) 저장소.
  *
- * 3개 테이블 (DATABASE_URL 없으면 전부 스킵 → 항상 무료 20건, 기존 동작 유지):
+ * 3개 테이블 (DATABASE_URL 없으면 전부 스킵 → 항상 무료(하루 20건), 기존 동작 유지):
  *  - app_tokens        : mall_id → 몰 장기토큰 (판매사가 결제 웹훅에서 extend 호출할 때 사용)
  *  - app_entitlement   : workspace /app-installed/status 결과 캐시 (5분 TTL)
  *  - app_subscriptions : 인앱결제 기록 (paid 판정의 근거)
@@ -114,6 +114,21 @@ export async function recordSubscription(opts: {
     await db`insert into app_subscriptions (mall_id, order_no, payment_type, price, until_ts)
              values (${String(opts.mallNo)}, ${opts.orderNo ?? ''}, ${opts.paymentType}, ${opts.price}, ${opts.untilTs})`;
     return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 결제/체험 기록이 같은 주문번호로 이미 있는지 — 외부 결제사 웹훅 재전송 멱등 처리용. */
+export async function findSubscriptionByOrder(mallNo: number, orderNo: string): Promise<boolean> {
+  const db = sql();
+  if (!db) return false;
+  try {
+    await ensureTables(db);
+    const rows = await db<{ id: number }[]>`
+      select id from app_subscriptions
+      where mall_id = ${String(mallNo)} and order_no = ${orderNo} limit 1`;
+    return rows.length > 0;
   } catch {
     return false;
   }

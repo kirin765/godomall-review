@@ -9,9 +9,9 @@ export const dynamic = 'force-dynamic';
  * 공통 웹훅 — 앱 설치/삭제(CHANGE_APP_STATUS).
  * payload: { eventType, currentStatus: "ACTIVE"|"DELETED", appNo, appInstalledNo, mallNo, shopNo, solutionType }
  *
- * 무료 20건은 "쇼핑몰(몰 ID)당 평생 한도"다.
- * DELETED 시 사용량을 리셋하지 않는다 — 삭제→재설치로 무료 한도가 되살아나면
- * 심사/운영상 "20건 넘게 등록 가능"으로 오인될 수 있기 때문(심사 문의 확인됨).
+ * 무료 사용량(하루 20건, godo_daily_usage)과 14일 체험 시작 기록(godo_trial)은
+ * "쇼핑몰(몰 ID)당"으로 남기고 삭제·재설치해도 초기화하지 않는다 — 재설치로 한도·체험이
+ * 되살아나면 심사/운영상 오인이 생긴다(심사 문의 확인됨).
  * DELETED 시 entitlement 캐시·몰 토큰만 정리한다(결제 기록은 환불/정산 근거로 유지).
  * ⚠️ godomall 웹훅은 문서에 서명 헤더가 없어, appNo + solutionType 외에는 위조 검증 수단이 없다.
  * 항상 200을 돌려 재전송 스톰을 막는다.

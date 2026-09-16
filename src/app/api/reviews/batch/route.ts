@@ -43,11 +43,11 @@ export async function POST(req: NextRequest) {
   let toWrite = pending; let used = quota.used;
   if (!quota.paid && pending.length) {
     const want = Math.min(pending.length, quota.allowed);
-    if (want <= 0) return NextResponse.json({ ...quota, already: dedup.already, quotaExhausted: true, error: '무료 이용 한도를 확인해 주세요.' }, { status: 402 });
+    if (want <= 0) return NextResponse.json({ ...quota, already: dedup.already, quotaExhausted: true, error: `무료는 하루 ${FREE_LIMIT}건까지 옮길 수 있어요. 내일 다시 채워지고, 무제한은 유료로 전환해 주세요.` }, { status: 402 });
     let reserved;
     try { reserved = await reserveQuota(shop, want); }
     catch { return NextResponse.json({ error: '사용량을 저장하지 못했습니다.', retryable: true }, { status: 503 }); }
-    if (!reserved.ok) return NextResponse.json({ ...quota, used: reserved.used, already: dedup.already, quotaExhausted: true, error: '무료 이용 한도를 확인해 주세요.' }, { status: 402 });
+    if (!reserved.ok) return NextResponse.json({ ...quota, used: reserved.used, already: dedup.already, quotaExhausted: true, error: `무료는 하루 ${FREE_LIMIT}건까지 옮길 수 있어요. 내일 다시 채워지고, 무제한은 유료로 전환해 주세요.` }, { status: 402 });
     used = reserved.used; toWrite = pending.slice(0, want);
   }
   const outcome = await writeReviews(session.accessToken, shop, productNo, String(body.source ?? 'coupang'), toWrite, deadline);

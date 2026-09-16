@@ -10,8 +10,10 @@
  * 동일 계열로, 워크스페이스가 고도몰/샵바이를 함께 인증한다.
  *
  * ⚠️ 앱이 아직 "판매앱+인앱결제"로 전환되지 않았거나 토큰이 workspace에서 인정되지 않으면
- *    status 조회가 401/404로 실패한다 → UNKNOWN(무료 폴백)으로 처리해 기존 무료 20건 동작을 깨지 않게 한다.
+ *    status 조회가 401/404로 실패한다 → UNKNOWN(무료 폴백)으로 처리해 기존 무료 동작을 깨지 않게 한다.
  */
+
+import { PADDLE_CONFIG } from '@/lib/paddle';
 
 const WORKSPACE_API = process.env.GODO_WORKSPACE_API || 'https://server-api.e-ncp.com';
 const SYSTEM_KEY = process.env.GODOMALL_SYSTEM_KEY || '';
@@ -105,19 +107,14 @@ export const PAID_PRICE = Number(process.env.GODO_PAID_PRICE || '9900');
 export const PAID_MONTHS = Number(process.env.GODO_PAID_MONTHS || '1');
 
 /**
- * 수동 계좌이체 결제 안내 — 앱스토어에 가격·결제 폼이 없어 셀러↔몰 직거래로 수신한다
- * (2026-09-02 사용자 확정: 결제 방식 = 수동 계좌이체, 9,900원 부가세 포함).
- * 관리 화면 plan에 그대로 내려 고객에게 계좌이체 절차를 안내한다.
+ * 결제 안내 — Paddle Billing 호스티드 체크아웃(Paddle.js)으로 수신한다.
+ * 관리 화면 plan에 이 설정을 그대로 내려 결제 버튼을 렌더링한다(clientToken은 공개 가능).
+ * PADDLE_CLIENT_TOKEN/PADDLE_PRICE_ID 미설정이면 enabled=false → 화면은 문의 안내로 폴백한다.
  */
 export const PAYMENT_INFO = {
-  method: 'bank' as const,
-  bank: '토스뱅크',
-  account: '1002-5844-8101',
-  holder: '온누리문방구',
-  /** 부가세 포함 여부 — true면 PAID_PRICE가 총액(세금 포함) */
-  vatIncluded: true,
-  /** 입금 후 연락처 — 이곳으로 입금자명·몰을 알려주면 수동으로 전환한다 */
-  contactEmail: process.env.SUPPORT_EMAIL || 'kwan765@naver.com',
+  ...PADDLE_CONFIG,
+  /** 표시 가격(부가세 포함 총액) — 실제 금액은 Paddle priceId가 결정한다 */
+  price: PAID_PRICE,
 } as const;
 
 export type PaymentInfo = typeof PAYMENT_INFO;
@@ -138,10 +135,27 @@ export function parseWorkspaceDate(s?: string): Date | null {
   return new Date(y, mo - 1, d, hh, mi, ss);
 }
 
+/** workspace 만료일시 문자열(yyyy-MM-dd HH:mm:ss) */
+function fmtDateTime(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ` +
+    `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
+/** Date → workspace 만료일시 문자열(yyyy-MM-dd HH:mm:ss). 외부 결제사(Paddle) 만료일 전달에 쓴다. */
+export function formatWorkspaceDate(d: Date): string {
+  return fmtDateTime(d);
+}
+
 /** now + months 뒤의 만료일시 문자열(workspace 포맷) */
 export function expiryAfterMonths(months: number, from = new Date()): string {
   const d = new Date(from);
   d.setMonth(d.getMonth() + months);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ` +
-    `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+  return fmtDateTime(d);
+}
+
+/** now + days 뒤의 만료일시 문자열(workspace 포맷). 무료 체험(14일) 부여에 쓴다. */
+export function expiryAfterDays(days: number, from = new Date()): string {
+  const d = new Date(from);
+  d.setDate(d.getDate() + days);
+  return fmtDateTime(d);
 }

@@ -102,7 +102,7 @@ export async function GET() {
       blockedBy: ent.status === 'EXPIRED' ? 'expired' : ent.status === 'DELETED' ? 'deleted' : null,
       /** 앱스토어 구매 페이지 — 관리 화면의 "결제 안내" 문구에 링크로 연결한다 */
       storeUrl: appStoreUrl(),
-      /** 수동 계좌이체 결제 안내 — 관리 화면이 이 정보로 계좌·금액·연락처를 보여준다 */
+      /** Paddle 결제 설정 — 관리 화면이 이 정보로 결제 버튼을 렌더링한다 */
       payment: PAYMENT_INFO,
     },
     products,
