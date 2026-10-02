@@ -3,6 +3,7 @@ import { exchangeLongLived, getMallProfile } from '@/lib/godomall';
 import { sessionCookie } from '@/lib/launch';
 import { saveToken } from '@/lib/entitlement';
 import { ensureFreeTrial } from '@/lib/trial';
+import { relativeRedirect } from '@/lib/http';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -32,7 +33,7 @@ export async function GET(req: NextRequest) {
   // 관리 화면을 볼 수 있게 한다 (diag 라우트 등으로 만든 launch URL을 localhost로 열면 된다).
   // NODE_ENV='production' 빌드에는 이 분기가 들어가지 않는다 — 심사·운영 흐름 영향 없음.
   if (process.env.NODE_ENV === 'development') {
-    const res = NextResponse.redirect(new URL('/admin', req.url));
+    const res = relativeRedirect('/admin');
     res.cookies.set(sessionCookie(1, 'dev-token'));
     return res;
   }
@@ -58,7 +59,7 @@ export async function GET(req: NextRequest) {
       /* 체험 부여 실패는 다음 실행에서 재시도된다 */
     }
 
-    const res = NextResponse.redirect(new URL('/admin', req.url));
+    const res = relativeRedirect('/admin');
     res.cookies.set(sessionCookie(profile.mallNo, access_token));
     return res;
   } catch (e) {
